@@ -69,3 +69,6 @@ __pycache__/
 
 # Project notes
 .note/
+
+# CodeGraph local index (built by the codegraph MCP tooling)
+.codegraph/

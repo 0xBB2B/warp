@@ -323,7 +323,8 @@ use crate::settings::{
     active_theme_kind, respect_system_theme, AISettings, AISettingsChangedEvent,
     AccessibilitySettings, AliasExpansionSettings, AppEditorSettings, BlockVisibilitySettings,
     ChangelogSettings, CodeSettings, CodeSettingsChangedEvent, CtrlTabBehavior, CursorBlink,
-    DebugSettings, DefaultSessionMode, FontSettings, GPUSettings, InputModeSettings, InputSettings,
+    DebugSettings, DefaultSessionMode, FontSettings, GPUSettings, GitSettings,
+    GitSettingsChangedEvent, InputModeSettings, InputSettings,
     MonospaceFontSize, PaneSettings, PrivacySettings, SelectionSettings, Settings, SshSettings,
     ThemeSettings,
 };
@@ -2917,6 +2918,13 @@ impl Workspace {
                 CodeSettingsChangedEvent::ShowProjectExplorer { .. }
                     | CodeSettingsChangedEvent::ShowGlobalSearch { .. }
             ) {
+                me.update_left_panel_available_views(ctx);
+                ctx.notify();
+            }
+        });
+
+        ctx.subscribe_to_model(&GitSettings::handle(ctx), |me, _, event, ctx| {
+            if matches!(event, GitSettingsChangedEvent::ShowGitGraph { .. }) {
                 me.update_left_panel_available_views(ctx);
                 ctx.notify();
             }
@@ -21243,7 +21251,10 @@ impl Workspace {
         if WarpDriveSettings::is_warp_drive_enabled(ctx) {
             views.push(ToolPanelView::WarpDrive);
         }
-        if cfg!(feature = "local_fs") && FeatureFlag::GitGraph.is_enabled() {
+        if cfg!(feature = "local_fs")
+            && FeatureFlag::GitGraph.is_enabled()
+            && *GitSettings::as_ref(ctx).show_git_graph.value()
+        {
             views.push(ToolPanelView::GitGraph);
         }
         views

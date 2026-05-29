@@ -13,7 +13,7 @@ use super::native_preference::NativePreferenceSettings;
 use super::{
     AISettings, AccessibilitySettings, AliasExpansionSettings, AppEditorSettings,
     BlockVisibilitySettings, ChangelogSettings, CodeSettings, DebugSettings, EmacsBindingsSettings,
-    FontSettings, FontSettingsChangedEvent, GPUSettings, InputBoxType, InputModeSettings,
+    FontSettings, FontSettingsChangedEvent, GPUSettings, GitSettings, InputBoxType, InputModeSettings,
     InputSettings, PaneSettings, SameLinePromptBlockSettings, ScrollSettings, SelectionSettings,
     SshSettings, ThemeSettings, VimBannerSettings, WarpDrivePrivacySettings,
 };
@@ -65,6 +65,7 @@ pub fn register_all_settings(ctx: &mut AppContext) {
     CommandSearchSettings::register(ctx);
     AliasExpansionSettings::register(ctx);
     CodeSettings::register(ctx);
+    GitSettings::register(ctx);
     LigatureSettings::register(ctx);
     GPUSettings::register(ctx);
     ChangelogSettings::register(ctx);

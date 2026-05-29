@@ -880,7 +880,9 @@ pub enum FeatureFlag {
     /// Gates the Grouped Tabs feature.
     GroupedTabs,
 
-    /// Gates the read-only Git Graph (commit DAG) tab in the left panel.
+    /// Gates availability of the read-only Git Graph (commit DAG) tab per channel.
+    /// Within channels where it is enabled, the user setting `GitSettings.show_git_graph`
+    /// controls whether the panel is actually shown.
     GitGraph,
 }
 

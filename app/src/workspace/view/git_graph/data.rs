@@ -167,20 +167,21 @@ pub(crate) fn parse_decorate(decorate: &str) -> Vec<RefLabel> {
 
 /// 加载某仓库的提交图谱。
 ///
-/// `limit` 控制本次最多取多少提交，`skip` 用于分页（已加载数）。
-/// 使用 `--all` 覆盖所有引用、`--date-order` 保证布局稳定、`--decorate=full`
+/// `branch_refs` 控制图谱覆盖范围：`None` 用 `--all`（所有引用）；`Some(refs)` 只覆盖给定
+/// 的分支 ref（如 `refs/heads/main`、`refs/remotes/origin/dev`），空切片表示用户取消了全部
+/// 分支，返回空图谱。`limit`/`skip` 用于分页。`--date-order` 保证布局稳定、`--decorate=full`
 /// 让 `%D` 可被 [`parse_decorate`] 可靠区分类别。
 #[cfg(not(target_family = "wasm"))]
 pub(crate) async fn load_commit_graph(
     repo_root: &Path,
+    branch_refs: Option<&[String]>,
     limit: usize,
     skip: usize,
 ) -> Result<Vec<CommitNode>> {
     let n = limit.to_string();
     let skip_s = skip.to_string();
-    let args = [
+    let mut args: Vec<&str> = vec![
         "log",
-        "--all",
         "--date-order",
         "--decorate=full",
         "--no-color",
@@ -190,8 +191,74 @@ pub(crate) async fn load_commit_graph(
         &skip_s,
         LOG_FORMAT,
     ];
+    // 选定的分支 ref 作为 revision 跟在 options 之后；None 时退回 --all。
+    match branch_refs {
+        None => args.push("--all"),
+        Some(refs) => {
+            if refs.is_empty() {
+                return Ok(Vec::new());
+            }
+            args.extend(refs.iter().map(String::as_str));
+        }
+    }
     let stdout = warp_util::git::run_git_command(repo_root, &args).await?;
     Ok(parse_commit_log(&stdout))
+}
+
+/// 一个可用于过滤图谱的分支引用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BranchRef {
+    /// 展示名（去掉 `refs/heads/` 或 `refs/remotes/` 前缀）。
+    pub display_name: String,
+    /// 传给 `git log` 的完整 ref（如 `refs/heads/main`、`refs/remotes/origin/main`）。
+    pub ref_name: String,
+    /// 本地分支还是远程分支（决定展示分组/样式）。
+    pub kind: RefKind,
+}
+
+/// 加载某仓库的本地 + 远程分支列表（供分支过滤下拉使用）。
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn load_branches(repo_root: &Path) -> Result<Vec<BranchRef>> {
+    let args = [
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads",
+        "refs/remotes",
+    ];
+    let stdout = warp_util::git::run_git_command(repo_root, &args).await?;
+    Ok(parse_branch_refs(&stdout))
+}
+
+/// 解析 `git for-each-ref --format=%(refname)` 的输出为分支列表。
+///
+/// 每行是一个完整 ref。过滤掉远程符号 HEAD（`refs/remotes/*/HEAD`，对浏览无意义）。
+/// 本地分支在前、远程分支在后，各自按名排序，保证下拉顺序稳定。
+pub(crate) fn parse_branch_refs(stdout: &str) -> Vec<BranchRef> {
+    let mut locals = Vec::new();
+    let mut remotes = Vec::new();
+    for line in stdout.lines() {
+        let full = line.trim();
+        if let Some(name) = full.strip_prefix("refs/heads/") {
+            locals.push(BranchRef {
+                display_name: name.to_string(),
+                ref_name: full.to_string(),
+                kind: RefKind::LocalBranch,
+            });
+        } else if let Some(name) = full.strip_prefix("refs/remotes/") {
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            remotes.push(BranchRef {
+                display_name: name.to_string(),
+                ref_name: full.to_string(),
+                kind: RefKind::RemoteBranch,
+            });
+        }
+    }
+    locals.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    remotes.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    locals.extend(remotes);
+    locals
 }
 
 /// 发现 `anchor` 相关的所有 git 仓库根，按展示顺序返回（去重）：

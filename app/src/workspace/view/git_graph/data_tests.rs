@@ -251,6 +251,41 @@ fn scan_subdir_repos_depth_two_finds_nested_under_plain_dir() {
     assert_eq!(found, vec![root.join("group/inner")]);
 }
 
+#[test]
+fn parse_branch_refs_splits_local_and_remote_sorted() {
+    // 故意打乱顺序、混入远程符号 HEAD（应被过滤）。
+    let input = "refs/heads/main\n\
+                 refs/remotes/origin/dev\n\
+                 refs/heads/feature/login\n\
+                 refs/remotes/origin/HEAD\n\
+                 refs/remotes/origin/main\n";
+    let branches = parse_branch_refs(input);
+
+    // 本地在前（按名排序），远程在后（按名排序）；origin/HEAD 被过滤。
+    let got: Vec<(&str, RefKind)> = branches
+        .iter()
+        .map(|b| (b.display_name.as_str(), b.kind))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("feature/login", RefKind::LocalBranch),
+            ("main", RefKind::LocalBranch),
+            ("origin/dev", RefKind::RemoteBranch),
+            ("origin/main", RefKind::RemoteBranch),
+        ]
+    );
+    // ref_name 保留完整 ref，供 git log 使用。
+    assert_eq!(branches[0].ref_name, "refs/heads/feature/login");
+    assert_eq!(branches[2].ref_name, "refs/remotes/origin/dev");
+}
+
+#[test]
+fn parse_branch_refs_handles_empty() {
+    assert!(parse_branch_refs("").is_empty());
+    assert!(parse_branch_refs("\n  \n").is_empty());
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn scan_subdir_repos_does_not_descend_into_found_repo() {

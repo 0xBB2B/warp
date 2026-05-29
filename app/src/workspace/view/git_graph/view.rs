@@ -6,6 +6,7 @@
 //! 状态直接持有在视图内（单实例、无共享），不引入单独的 Model 间接层——待后续
 //! 出现跨视图共享需求时再抽。
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -17,30 +18,37 @@ use warpui::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
 use warpui::elements::{
-    resizable_state_handle, Align, ChildView, ClippedScrollStateHandle, ClippedScrollable,
-    ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, DragBarSide, Element, Empty, Fill,
-    Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius,
-    Resizable, ResizableStateHandle, ScrollbarWidth, SelectableArea, SelectionHandle, Shrinkable,
-    Text, UniformList, UniformListState,
+    resizable_state_handle, Align, Border, ChildAnchor, ChildView, ClippedScrollStateHandle,
+    ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
+    DragBarSide, Element, Empty, Fill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, ParentElement, PositionedElementAnchor,
+    PositionedElementOffsetBounds, Radius, Resizable, ResizableStateHandle, SavePosition,
+    ScrollbarWidth, SelectableArea, SelectionHandle, Shrinkable, Stack, Text, UniformList,
+    UniformListState,
 };
+use warpui::geometry::vector::vec2f;
 use warpui::keymap::macros::id;
 use warpui::keymap::FixedBinding;
+use warpui::scene::DropShadow;
+use warpui::text_layout::ClipConfig;
 use warpui::units::Pixels;
 use warpui::{
     AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
 };
 
+use warp_core::ui::theme::color::internal_colors;
 use warp_core::ui::Icon;
 use warpui::ui_components::components::UiComponent;
 
-use super::data::{ChangedFile, CommitDetail, CommitNode, RefKind, RefLabel};
+use super::data::{BranchRef, ChangedFile, CommitDetail, CommitNode, RefKind, RefLabel};
 use super::layout::{assign_lanes, GraphLayout, GraphRow};
 use super::row_canvas::GitGraphRowCanvas;
 use crate::appearance::Appearance;
+use crate::menu::{MenuItem, MenuItemFields};
 use crate::settings::{GitSettings, GitSettingsChangedEvent};
 use crate::ui_components::buttons::icon_button;
 use crate::ui_components::item_highlight::ItemHighlightState;
-use crate::view_components::dropdown::{Dropdown, DropdownItem};
+use crate::view_components::dropdown::{Dropdown, DropdownAction};
 
 /// 每页加载的提交数。
 const COMMIT_PAGE_SIZE: usize = 200;
@@ -66,6 +74,16 @@ pub(crate) enum GitGraphAction {
     SelectCommit(usize),
     /// 切换到发现列表中第 N 个仓库（多仓库时由顶部下拉派发）。
     SelectRepository(usize),
+    /// 展开/收起分支过滤浮层。
+    ToggleBranchFilter,
+    /// 关闭分支过滤浮层（点击浮层外部时）。
+    CloseBranchFilter,
+    /// 切换某个分支 ref 的显隐（值为完整 ref，如 `refs/heads/main`）。
+    ToggleBranch(String),
+    /// 勾选全部分支。
+    SelectAllBranches,
+    /// 取消勾选全部分支。
+    DeselectAllBranches,
     /// 手动重新扫描工作目录并重新加载图谱。
     Refresh,
     /// 关闭详情区（取消选中）。
@@ -108,6 +126,22 @@ pub(crate) struct GitGraphView {
     selected_repo: Option<usize>,
     /// 多仓库时顶部的仓库选择下拉（子视图，派发 [`GitGraphAction::SelectRepository`]）。
     repo_dropdown: ViewHandle<Dropdown<GitGraphAction>>,
+    /// 当前仓库的分支列表（本地 + 远程），供分支过滤浮层展示。
+    branches: Arc<Vec<BranchRef>>,
+    /// 当前勾选（参与图谱显示）的分支 ref 集合（存完整 ref）。
+    selected_branches: HashSet<String>,
+    /// 分支过滤浮层是否展开。
+    branch_filter_expanded: bool,
+    /// 分支过滤按钮的鼠标状态。
+    branch_filter_button_mouse_state: MouseStateHandle,
+    /// 分支浮层"全选"按钮的鼠标状态。
+    branch_select_all_mouse_state: MouseStateHandle,
+    /// 分支浮层"全不选"按钮的鼠标状态。
+    branch_deselect_all_mouse_state: MouseStateHandle,
+    /// 分支浮层内每行的鼠标状态（供悬停高亮），与 `branches` 等长。
+    branch_mouse_states: Arc<Vec<MouseStateHandle>>,
+    /// 分支浮层列表的滚动状态（分支多时可滚动）。
+    branch_scroll_state: ClippedScrollStateHandle,
     /// 已加载的提交（用 `Arc` 便于零拷贝移动进 [`UniformList`] 的构建闭包）。
     commits: Arc<Vec<CommitNode>>,
     /// 由 [`assign_lanes`] 算出的逐行泳道布局，与 `commits` 一一对应。
@@ -180,6 +214,14 @@ impl GitGraphView {
             repositories: Arc::new(Vec::new()),
             selected_repo: None,
             repo_dropdown,
+            branches: Arc::new(Vec::new()),
+            selected_branches: HashSet::new(),
+            branch_filter_expanded: false,
+            branch_filter_button_mouse_state: MouseStateHandle::default(),
+            branch_select_all_mouse_state: MouseStateHandle::default(),
+            branch_deselect_all_mouse_state: MouseStateHandle::default(),
+            branch_mouse_states: Arc::new(Vec::new()),
+            branch_scroll_state: ClippedScrollStateHandle::new(),
             commits: Arc::new(Vec::new()),
             layout: Arc::new(empty_layout()),
             state: LoadState::NoRepo,
@@ -283,22 +325,34 @@ impl GitGraphView {
     }
 
     /// 用当前仓库列表与选中项刷新顶部仓库下拉的菜单项与选中态。
+    ///
+    /// 用 rich items 给**当前选中的仓库行**单独设一个区分背景色（中性高亮 `fg_overlay_4`），
+    /// 与其它行悬停时的 `accent_button_color`（accent 粉）明显不同——共享 [`Menu`] 默认把
+    /// "选中"与"悬停"都用 accent 系，二者几乎同色而分不清当前仓库；这里仅对该项覆盖、不动全局。
+    /// 长仓库名用省略号裁剪，避免菜单过宽看不全。
     fn update_repo_dropdown(&self, ctx: &mut ViewContext<Self>) {
         let repos = self.repositories.clone();
         let selected = self.selected_repo;
+        let selected_bg = internal_colors::fg_overlay_4(Appearance::as_ref(ctx).theme());
         self.repo_dropdown.update(ctx, |dropdown, ctx| {
-            dropdown.set_items(
-                repos
-                    .iter()
-                    .enumerate()
-                    .map(|(i, path)| {
-                        // 展示目录名，悬停 tooltip 给出完整路径（同名仓库可借此区分）。
-                        DropdownItem::new(repo_display_name(path), GitGraphAction::SelectRepository(i))
-                            .with_tooltip(path.to_string_lossy().to_string())
-                    })
-                    .collect(),
-                ctx,
-            );
+            let items: Vec<MenuItem<DropdownAction>> = repos
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    // 展示目录名，悬停 tooltip 给出完整路径（同名仓库可借此区分）。
+                    let mut item = MenuItemFields::new(repo_display_name(path))
+                        .with_on_select_action(DropdownAction::select_action_and_close(
+                            GitGraphAction::SelectRepository(i),
+                        ))
+                        .with_tooltip(path.to_string_lossy().to_string())
+                        .with_clip_config(ClipConfig::ellipsis());
+                    if selected == Some(i) {
+                        item = item.with_override_hover_background_color(selected_bg);
+                    }
+                    item.into_item()
+                })
+                .collect();
+            dropdown.set_rich_items(items, ctx);
             if let Some(sel) = selected {
                 dropdown.set_selected_by_index(sel, ctx);
             }
@@ -325,6 +379,34 @@ impl GitGraphView {
         self.reload(ctx);
     }
 
+    /// 切换某分支的显隐并重载图谱。浮层保持打开：本方法只改 `self` 状态再 `ctx.notify()`
+    /// 重渲染浮层（勾选标记随之更新），不调用任何子视图的 `update()`，故不存在
+    /// [`Self::select_repository`] 注释里那种重入借用崩溃。
+    fn toggle_branch(&mut self, ref_name: &str, ctx: &mut ViewContext<Self>) {
+        if !self.selected_branches.remove(ref_name) {
+            self.selected_branches.insert(ref_name.to_string());
+        }
+        self.load_commits(ctx);
+    }
+
+    /// 勾选全部分支（已全选则跳过，避免无谓重载）。
+    fn select_all_branches(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.branches.is_empty() || self.selected_branches.len() == self.branches.len() {
+            return;
+        }
+        self.selected_branches = self.branches.iter().map(|b| b.ref_name.clone()).collect();
+        self.load_commits(ctx);
+    }
+
+    /// 取消勾选全部分支（已全不选则跳过）。
+    fn deselect_all_branches(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.selected_branches.is_empty() {
+            return;
+        }
+        self.selected_branches.clear();
+        self.load_commits(ctx);
+    }
+
     /// 清空选中与详情（仓库变化/重新加载时调用）。
     fn clear_selection(&mut self) {
         self.selected = None;
@@ -340,13 +422,74 @@ impl GitGraphView {
         }
     }
 
-    /// 重新加载当前选中仓库的提交图谱。
+    /// 重新加载当前选中仓库：先取分支列表（默认全选），再按选中分支加载提交图谱。
+    /// 切仓库会重置分支过滤（不同仓库分支不同）并收起浮层。
     fn reload(&mut self, ctx: &mut ViewContext<Self>) {
+        self.branch_filter_expanded = false;
+
+        let Some(dir) = self.current_repo_path() else {
+            self.branches = Arc::new(Vec::new());
+            self.selected_branches.clear();
+            self.branch_mouse_states = Arc::new(Vec::new());
+            self.clear_selection();
+            self.commits = Arc::new(Vec::new());
+            self.layout = Arc::new(empty_layout());
+            self.row_mouse_states = Arc::new(Vec::new());
+            self.has_more = false;
+            self.state = LoadState::NoRepo;
+            ctx.notify();
+            return;
+        };
+
+        self.state = LoadState::Loading;
+        ctx.notify();
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            // 用于在结果返回时判断仓库是否已被切走（任务是 detach 的，无需句柄）。
+            let expected = dir.clone();
+            ctx.spawn(
+                async move { super::data::load_branches(&dir).await },
+                move |view, result, ctx| {
+                    if view.current_repo_path().as_deref() != Some(expected.as_path()) {
+                        return;
+                    }
+                    // 分支加载成功则默认全选；失败则置空（load_commits 退回 --all 仍能看历史）。
+                    let branches = result.unwrap_or_default();
+                    view.selected_branches =
+                        branches.iter().map(|b| b.ref_name.clone()).collect();
+                    view.branch_mouse_states = Arc::new(
+                        (0..branches.len()).map(|_| MouseStateHandle::default()).collect(),
+                    );
+                    view.branches = Arc::new(branches);
+                    view.load_commits(ctx);
+                },
+            );
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = dir;
+            self.state = LoadState::NoRepo;
+            ctx.notify();
+        }
+    }
+
+    /// 当前分支过滤：分支列表为空（未知/加载失败）时返回 `None`（退回 `--all`，避免空图谱）；
+    /// 否则返回选中的分支 ref（可能为空 = 用户取消了全部分支 = 空图谱）。
+    fn branch_filter(&self) -> Option<Vec<String>> {
+        if self.branches.is_empty() {
+            None
+        } else {
+            Some(self.selected_branches.iter().cloned().collect())
+        }
+    }
+
+    /// 按当前仓库 + 当前分支过滤加载第一页提交图谱（分支勾选变化、或分支加载完成后调用）。
+    fn load_commits(&mut self, ctx: &mut ViewContext<Self>) {
         self.clear_selection();
         self.has_more = false;
         self.loading_more = false;
-        // 重新加载会把提交重置回第一页，滚动位置也回到顶部（顶部即最新提交），
-        // 否则用户滚到下面刷新后会停在中下部，被迫手动滚回。
+        // 重新加载把提交重置回第一页，滚动位置回到顶部（顶部即最新提交）。
         self.list_state.scroll_to(0);
 
         let Some(dir) = self.current_repo_path() else {
@@ -363,10 +506,13 @@ impl GitGraphView {
 
         #[cfg(not(target_family = "wasm"))]
         {
-            // 用于在结果返回时判断仓库是否已被切走（任务是 detach 的，无需句柄）。
             let expected = dir.clone();
+            let filter = self.branch_filter();
             ctx.spawn(
-                async move { super::data::load_commit_graph(&dir, COMMIT_PAGE_SIZE, 0).await },
+                async move {
+                    super::data::load_commit_graph(&dir, filter.as_deref(), COMMIT_PAGE_SIZE, 0)
+                        .await
+                },
                 move |view, result, ctx| {
                     if view.current_repo_path().as_deref() != Some(expected.as_path()) {
                         // 仓库已切换，丢弃过期结果。
@@ -423,8 +569,12 @@ impl GitGraphView {
         #[cfg(not(target_family = "wasm"))]
         {
             let expected = dir.clone();
+            let filter = self.branch_filter();
             ctx.spawn(
-                async move { super::data::load_commit_graph(&dir, COMMIT_PAGE_SIZE, skip).await },
+                async move {
+                    super::data::load_commit_graph(&dir, filter.as_deref(), COMMIT_PAGE_SIZE, skip)
+                        .await
+                },
                 move |view, result, ctx| {
                     view.loading_more = false;
                     // 仓库已切换、或起始位置已变（被 reload 打断），丢弃过期结果。
@@ -637,15 +787,21 @@ impl GitGraphView {
             .finish()
     }
 
-    /// 顶部条：左侧为仓库选择下拉，右侧为刷新按钮。
+    /// 顶部条：左侧为仓库下拉 + 分支过滤下拉，右侧为刷新按钮。
     fn render_header(&self, appearance: &Appearance) -> Box<dyn Element> {
-        // 有仓库就显示下拉（单仓库时下拉被置灰、仅展示当前仓库名，保持布局一致）；
-        // 无仓库（NoRepo）时左侧留空，不显示没有内容的空下拉。
-        let left: Box<dyn Element> = if self.repositories.is_empty() {
-            Empty::new().finish()
-        } else {
-            ChildView::new(&self.repo_dropdown).finish()
-        };
+        // 左侧控件组：有仓库显示仓库下拉（单仓库置灰仅展示当前仓库名），有分支显示分支过滤。
+        let mut left = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+        if !self.repositories.is_empty() {
+            left = left.with_child(ChildView::new(&self.repo_dropdown).finish());
+        }
+        if !self.branches.is_empty() {
+            left = left.with_child(
+                Container::new(self.render_branch_filter(appearance))
+                    .with_padding_left(6.)
+                    .finish(),
+            );
+        }
+
         let refresh = icon_button(
             appearance,
             Icon::Refresh,
@@ -663,13 +819,269 @@ impl GitGraphView {
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(left)
+                .with_child(left.finish())
                 .with_child(refresh)
                 .finish(),
         )
         .with_horizontal_padding(12.)
         .with_vertical_padding(6.)
         .finish()
+    }
+
+    /// 分支过滤控件：一个按钮 + 展开时锚定在按钮下方的浮层（[`Stack`] 叠加 [`OffsetPositioning`]）。
+    fn render_branch_filter(&self, appearance: &Appearance) -> Box<dyn Element> {
+        // 浮层锚点标签：用 [`SavePosition`] 记录按钮位置，浮层据此定位到按钮正下方。
+        let save_label = "git_graph_branch_filter".to_string();
+        let button =
+            SavePosition::new(self.render_branch_filter_button(appearance), &save_label).finish();
+        let mut stack = Stack::new().with_child(button);
+        if self.branch_filter_expanded {
+            let positioning = OffsetPositioning::offset_from_save_position_element(
+                save_label,
+                vec2f(0., 4.),
+                PositionedElementOffsetBounds::WindowByPosition,
+                PositionedElementAnchor::BottomLeft,
+                ChildAnchor::TopLeft,
+            );
+            stack.add_positioned_overlay_child(self.render_branch_popup(appearance), positioning);
+        }
+        stack.finish()
+    }
+
+    /// 分支过滤按钮（展示当前勾选概况 + 下拉箭头）。
+    fn render_branch_filter_button(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let label = self.branch_filter_summary();
+        let expanded = self.branch_filter_expanded;
+        let state = self.branch_filter_button_mouse_state.clone();
+        Hoverable::new(state, move |mouse_state| {
+            let chevron = ConstrainedBox::new(
+                Icon::ChevronDown
+                    .to_warpui_icon(theme.sub_text_color(theme.background()))
+                    .finish(),
+            )
+            .with_width(14.)
+            .with_height(14.)
+            .finish();
+            let row = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(
+                    // 限定最大宽度 + 末尾省略，超长分支名截断而非把按钮（及右侧刷新）撑出去。
+                    ConstrainedBox::new(
+                        Text::new_inline(
+                            label,
+                            appearance.ui_font_family(),
+                            appearance.ui_font_size(),
+                        )
+                        .with_color(theme.foreground().into())
+                        .with_clip(ClipConfig::ellipsis())
+                        .finish(),
+                    )
+                    .with_max_width(120.)
+                    .finish(),
+                )
+                .with_child(Container::new(chevron).with_padding_left(4.).finish())
+                .finish();
+            // 展开时按选中态高亮，否则仅悬停高亮（复用左侧面板通用高亮）。
+            let highlight = ItemHighlightState::new(expanded, mouse_state);
+            let mut container = Container::new(row)
+                .with_horizontal_padding(8.)
+                .with_vertical_padding(4.)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+            if let Some(bg) = highlight.background_color(appearance) {
+                container = container.with_background_color(bg.into_solid());
+            }
+            container.finish()
+        })
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(GitGraphAction::ToggleBranchFilter);
+        })
+        .finish()
+    }
+
+    /// 分支过滤浮层：可滚动的分支勾选列表，外包 [`Dismiss`] 实现点击外部关闭。
+    fn render_branch_popup(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let mut col = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Start);
+        for (i, branch) in self.branches.iter().enumerate() {
+            col = col.with_child(self.render_branch_row(i, branch, appearance));
+        }
+
+        let scrollable = ClippedScrollable::vertical(
+            self.branch_scroll_state.clone(),
+            col.finish(),
+            ScrollbarWidth::Auto,
+            theme.nonactive_ui_detail().into(),
+            theme.active_ui_detail().into(),
+            Fill::None,
+        )
+        .with_overlayed_scrollbar()
+        .finish();
+
+        // "全选 / 全不选"操作行固定在顶部（不随分支列表滚动），分支多时也能一键批量。
+        let body = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(self.render_branch_filter_actions(appearance))
+            .with_child(ConstrainedBox::new(scrollable).with_max_height(280.).finish())
+            .finish();
+
+        let panel = Container::new(ConstrainedBox::new(body).with_width(220.).finish())
+            .with_background_color(theme.background().into_solid())
+        .with_border(Border::all(1.).with_border_fill(theme.outline()))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+        .with_drop_shadow(DropShadow::default())
+        .with_vertical_padding(4.)
+        .finish();
+
+        Dismiss::new(panel)
+            .on_dismiss(|ctx, _| {
+                ctx.dispatch_typed_action(GitGraphAction::CloseBranchFilter);
+            })
+            .prevent_interaction_with_other_elements()
+            .finish()
+    }
+
+    /// 浮层内一行分支：勾选标记（选中显示 ✓，未选留同尺寸空位对齐）+ 分支名，整行可点切换。
+    fn render_branch_row(
+        &self,
+        index: usize,
+        branch: &BranchRef,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        let selected = self.selected_branches.contains(&branch.ref_name);
+        let is_remote = branch.kind == RefKind::RemoteBranch;
+        let display = branch.display_name.clone();
+        let ref_name = branch.ref_name.clone();
+        let state = self.branch_mouse_states.get(index).cloned().unwrap_or_default();
+        Hoverable::new(state, move |mouse_state| {
+            let check: Box<dyn Element> = if selected {
+                ConstrainedBox::new(Icon::Check.to_warpui_icon(theme.foreground()).finish())
+                    .with_width(14.)
+                    .with_height(14.)
+                    .finish()
+            } else {
+                ConstrainedBox::new(Empty::new().finish())
+                    .with_width(14.)
+                    .with_height(14.)
+                    .finish()
+            };
+            // 远程分支用次要色，和本地分支区分。
+            let name_color = if is_remote {
+                theme.sub_text_color(theme.background())
+            } else {
+                theme.foreground()
+            };
+            // 行撑满浮层宽度，使整行（含右侧空白）都成为点击热区，而非只有文字可点。
+            // 名字用 Shrinkable 占据剩余宽度 + 末尾省略，超长分支名截断而非溢出到提交列表。
+            let row = Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(Container::new(check).with_padding_right(6.).finish())
+                .with_child(
+                    Shrinkable::new(
+                        1.0,
+                        Text::new_inline(
+                            display,
+                            appearance.ui_font_family(),
+                            appearance.ui_font_size(),
+                        )
+                        .with_color(name_color.into())
+                        .with_clip(ClipConfig::ellipsis())
+                        .finish(),
+                    )
+                    .finish(),
+                )
+                .finish();
+            let highlight = ItemHighlightState::new(false, mouse_state);
+            let mut container = Container::new(row)
+                .with_horizontal_padding(8.)
+                .with_vertical_padding(4.);
+            if let Some(bg) = highlight.background_color(appearance) {
+                container = container.with_background_color(bg.into_solid());
+            }
+            container.finish()
+        })
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(GitGraphAction::ToggleBranch(ref_name.clone()));
+        })
+        .finish()
+    }
+
+    /// 浮层顶部的"全选 / 全不选"操作行。
+    fn render_branch_filter_actions(&self, appearance: &Appearance) -> Box<dyn Element> {
+        let select_all = self.render_branch_action_button(
+            "Select all",
+            GitGraphAction::SelectAllBranches,
+            self.branch_select_all_mouse_state.clone(),
+            appearance,
+        );
+        let deselect_all = self.render_branch_action_button(
+            "Deselect all",
+            GitGraphAction::DeselectAllBranches,
+            self.branch_deselect_all_mouse_state.clone(),
+            appearance,
+        );
+        Container::new(
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(select_all)
+                .with_child(Container::new(deselect_all).with_padding_left(8.).finish())
+                .finish(),
+        )
+        .with_horizontal_padding(4.)
+        .with_vertical_padding(2.)
+        .finish()
+    }
+
+    /// 一个浮层操作小按钮（accent 色文字 + 悬停高亮）。
+    fn render_branch_action_button(
+        &self,
+        label: &'static str,
+        action: GitGraphAction,
+        state: MouseStateHandle,
+        appearance: &Appearance,
+    ) -> Box<dyn Element> {
+        let theme = appearance.theme();
+        Hoverable::new(state, move |mouse_state| {
+            let mut container = Container::new(
+                Text::new_inline(label, appearance.ui_font_family(), appearance.ui_font_size())
+                    .with_color(theme.accent().into())
+                    .finish(),
+            )
+            .with_horizontal_padding(6.)
+            .with_vertical_padding(3.)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)));
+            let highlight = ItemHighlightState::new(false, mouse_state);
+            if let Some(bg) = highlight.background_color(appearance) {
+                container = container.with_background_color(bg.into_solid());
+            }
+            container.finish()
+        })
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(action.clone());
+        })
+        .finish()
+    }
+
+    /// 分支过滤按钮上的概况文案：全选 / 全不选 / 仅一个时直接显示分支名 / 其余显示数量。
+    fn branch_filter_summary(&self) -> String {
+        let total = self.branches.len();
+        let selected = self.selected_branches.len().min(total);
+        if selected == total {
+            "All branches".to_string()
+        } else if selected == 0 {
+            "No branches".to_string()
+        } else if selected == 1 {
+            // 只选一个分支时直接显示其名字，比 "1/N branches" 更直观。
+            self.branches
+                .iter()
+                .find(|b| self.selected_branches.contains(&b.ref_name))
+                .map(|b| b.display_name.clone())
+                .unwrap_or_else(|| "1 branch".to_string())
+        } else {
+            format!("{selected}/{total} branches")
+        }
     }
 }
 
@@ -995,6 +1407,17 @@ impl TypedActionView for GitGraphView {
         match action {
             GitGraphAction::SelectCommit(index) => self.select_commit(*index, ctx),
             GitGraphAction::SelectRepository(index) => self.select_repository(*index, ctx),
+            GitGraphAction::ToggleBranchFilter => {
+                self.branch_filter_expanded = !self.branch_filter_expanded;
+                ctx.notify();
+            }
+            GitGraphAction::CloseBranchFilter => {
+                self.branch_filter_expanded = false;
+                ctx.notify();
+            }
+            GitGraphAction::ToggleBranch(ref_name) => self.toggle_branch(ref_name, ctx),
+            GitGraphAction::SelectAllBranches => self.select_all_branches(ctx),
+            GitGraphAction::DeselectAllBranches => self.deselect_all_branches(ctx),
             // 手动刷新时重新扫描仓库（用户可能新增/删除了子仓库），再加载选中仓库。
             GitGraphAction::Refresh => self.discover(ctx),
             GitGraphAction::CloseDetail => {

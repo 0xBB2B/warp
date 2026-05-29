@@ -140,8 +140,8 @@ via design tokens is deferred.
 `GitGraphView` holds all state: `working_dir`, `commits: Arc<Vec<CommitNode>>`,
 `layout: Arc<GraphLayout>`, `state` (NoRepo/Loading/Loaded/Error), per-row
 `MouseStateHandle`s, `selected`, `detail` (None/Loading/Loaded/Error),
-two `UniformListState`s (graph + detail file list), refresh/​load-more mouse
-states, and `has_more` / `loading_more` for pagination.
+a `UniformListState` (graph list) plus a `ClippedScrollStateHandle` (detail area),
+refresh/​load-more mouse states, and `has_more` / `loading_more` for pagination.
 
 `GitGraphAction` = `SelectCommit(usize)` | `Refresh` | `LoadMore`, handled by the
 `TypedActionView` impl. Rows are wrapped in `Hoverable` and dispatch
@@ -154,8 +154,12 @@ states, and `has_more` / `loading_more` for pagination.
 - the graph list is a `UniformList`; when `has_more`, a trailing "Load more" row
   dispatches `LoadMore` (button-style pagination, not infinite-scroll).
 - the detail area shows full message, author (name+email), committer (if
-  different), full hash, and a virtualized changed-file list with `+adds/-dels`.
-  Timestamps are not yet formatted/shown.
+  different), full hash, and the changed-file list with `+adds/-dels`. The whole
+  area (message + files) is one `ClippedScrollable` region, so long commit
+  messages scroll into view together with the files (the file list is no longer a
+  separately-virtualized `UniformList` — a `UniformList` needs a bounded viewport
+  and can't nest inside a natural-height scroll container). Selecting a commit
+  resets the scroll to the top. Timestamps are not yet formatted/shown.
 
 Each commit row = `[GitGraphRowCanvas | short hash + ref badges + subject]`.
 Ref labels render as small rounded color-coded badges (HEAD/local/remote/tag).

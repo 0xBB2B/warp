@@ -16,13 +16,15 @@ use warpui::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
 use warpui::elements::{
-    resizable_state_handle, Align, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
-    DragBarSide, Element, Empty, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle,
-    ParentElement, Radius, Resizable, ResizableStateHandle, SelectableArea, SelectionHandle,
-    Shrinkable, Text, UniformList, UniformListState,
+    resizable_state_handle, Align, ClippedScrollStateHandle, ClippedScrollable, ConstrainedBox,
+    Container, CornerRadius, CrossAxisAlignment, DragBarSide, Element, Empty, Fill, Flex, Hoverable,
+    MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius, Resizable,
+    ResizableStateHandle, ScrollbarWidth, SelectableArea, SelectionHandle, Shrinkable, Text,
+    UniformList, UniformListState,
 };
 use warpui::keymap::macros::id;
 use warpui::keymap::FixedBinding;
+use warpui::units::Pixels;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext};
 
 use warp_core::ui::Icon;
@@ -104,8 +106,9 @@ pub(crate) struct GitGraphView {
     detail: DetailState,
     /// 提交列表滚动状态。
     list_state: UniformListState,
-    /// 详情区文件列表的滚动状态。
-    detail_list_state: UniformListState,
+    /// 详情区整体（提交信息 + 变更文件列表）的滚动状态：信息与文件统一在一个
+    /// 可滚动区域内，长提交信息也能滚动查看完整内容。
+    detail_scroll_state: ClippedScrollStateHandle,
     /// 刷新按钮的鼠标状态。
     refresh_mouse_state: MouseStateHandle,
     /// 是否可能还有更多提交可加载（上一页取满即认为有）。
@@ -153,7 +156,7 @@ impl GitGraphView {
             selected: None,
             detail: DetailState::None,
             list_state: UniformListState::new(),
-            detail_list_state: UniformListState::new(),
+            detail_scroll_state: ClippedScrollStateHandle::new(),
             refresh_mouse_state: MouseStateHandle::default(),
             has_more: false,
             loading_more: false,
@@ -331,6 +334,8 @@ impl GitGraphView {
         self.selected = Some(index);
         self.detail = DetailState::Loading;
         self.clear_detail_text_selection();
+        // 切换提交后详情内容整体替换，滚动位置回到顶部（否则会停在上一个提交的偏移处）。
+        self.detail_scroll_state.scroll_to(Pixels::zero());
         ctx.notify();
 
         #[cfg(not(target_family = "wasm"))]
@@ -448,7 +453,7 @@ impl GitGraphView {
                 render_detail_body(
                     commit,
                     detail,
-                    &self.detail_list_state,
+                    self.detail_scroll_state.clone(),
                     self.detail_selection_handle.clone(),
                     self.detail_selected_text.clone(),
                     appearance,
@@ -721,7 +726,7 @@ fn render_ref_badge(label: &RefLabel, appearance: &Appearance) -> Box<dyn Elemen
 fn render_detail_body(
     commit: Option<&CommitNode>,
     detail: &CommitDetail,
-    list_state: &UniformListState,
+    scroll_state: ClippedScrollStateHandle,
     selection_handle: SelectionHandle,
     selected_text: Arc<RwLock<Option<String>>>,
     appearance: &Appearance,
@@ -765,28 +770,34 @@ fn render_detail_body(
         true,
     );
 
-    // 文件列表（虚拟化、可滚动）。
-    let files = Arc::new(detail.files.clone());
-    let file_list = UniformList::new(list_state.clone(), files.len(), move |range, app| {
-        let appearance = Appearance::as_ref(app);
-        let rows: Vec<Box<dyn Element>> = range
-            .filter_map(|i| files.get(i).map(|f| render_file_row(f, appearance)))
-            .collect();
-        rows.into_iter()
-    });
+    // 提交信息 + 标题 + 全部变更文件行拼成一列，整列交给 [`ClippedScrollable`] 统一滚动。
+    // 不再虚拟化文件列表：单个提交的文件数有限，且把信息与文件放进同一个滚动区域，
+    // 长提交信息才能和文件一起滚动查看完整内容（虚拟化的 UniformList 需要有界视口，
+    // 无法嵌进按自然高度布局的滚动容器）。
+    let mut content = Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_child(Container::new(selectable_meta).with_vertical_padding(6.).finish())
+        .with_child(files_label);
+    for file in detail.files.iter() {
+        content = content.with_child(render_file_row(file, appearance));
+    }
 
-    Container::new(
-        Flex::column()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            .with_child(Container::new(selectable_meta).with_vertical_padding(6.).finish())
-            .with_child(files_label)
-            .with_child(Shrinkable::new(1.0, file_list.finish()).finish())
-            .finish(),
+    let theme = appearance.theme();
+    let scrollable = ClippedScrollable::vertical(
+        scroll_state,
+        content.finish(),
+        ScrollbarWidth::Auto,
+        theme.nonactive_ui_detail().into(),
+        theme.active_ui_detail().into(),
+        Fill::None,
     )
-    .with_horizontal_padding(12.)
-    .with_vertical_padding(8.)
-    .finish()
+    .with_overlayed_scrollbar()
+    .finish();
+
+    Container::new(scrollable)
+        .with_horizontal_padding(12.)
+        .with_vertical_padding(8.)
+        .finish()
 }
 
 /// 渲染一个变更文件行：路径 + `+增 -删`。

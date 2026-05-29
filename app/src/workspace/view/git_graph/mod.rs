@@ -13,4 +13,4 @@ pub(crate) mod layout;
 pub(crate) mod row_canvas;
 pub(crate) mod view;
 
-pub(crate) use view::GitGraphView;
+pub(crate) use view::{init, GitGraphView};

@@ -7,18 +7,22 @@
 //! 出现跨视图共享需求时再抽。
 
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_channel::Sender;
 use pathfinder_color::ColorU;
+use warpui::clipboard::ClipboardContent;
 use warpui::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
 use warpui::elements::{
     resizable_state_handle, Container, CornerRadius, CrossAxisAlignment, DragBarSide, Element, Empty,
     Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius,
-    Resizable, ResizableStateHandle, Shrinkable, Text, UniformList, UniformListState,
+    Resizable, ResizableStateHandle, SelectableArea, SelectionHandle, Shrinkable, Text, UniformList,
+    UniformListState,
 };
+use warpui::keymap::macros::id;
+use warpui::keymap::FixedBinding;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext};
 
 use warp_core::ui::Icon;
@@ -29,12 +33,23 @@ use super::layout::{assign_lanes, GraphLayout, GraphRow};
 use super::row_canvas::GitGraphRowCanvas;
 use crate::appearance::Appearance;
 use crate::ui_components::buttons::icon_button;
+use crate::ui_components::item_highlight::ItemHighlightState;
 
 /// 每页加载的提交数。
 const COMMIT_PAGE_SIZE: usize = 200;
 
 /// 距离列表末尾还剩这么多行时就预取下一页（无限滚动的提前量，避免滚到底才触发）。
 const LOAD_MORE_PREFETCH: usize = 10;
+
+/// 注册视图级键绑定：聚焦 Git Graph 面板时 Cmd/Ctrl+C 复制详情区选中的文本。
+/// 作用域限定到本视图，不会影响终端等其它上下文的复制。
+pub(crate) fn init(app: &mut AppContext) {
+    app.register_fixed_bindings([FixedBinding::new(
+        "cmdorctrl-c",
+        GitGraphAction::CopySelection,
+        id!(GitGraphView::ui_name()),
+    )]);
+}
 
 /// 视图自身的 action。
 #[derive(Debug, Clone)]
@@ -45,6 +60,8 @@ pub(crate) enum GitGraphAction {
     Refresh,
     /// 关闭详情区（取消选中）。
     CloseDetail,
+    /// 把详情区当前选中的文本复制到剪贴板（Cmd/Ctrl+C）。
+    CopySelection,
 }
 
 /// 视图向外发出的事件。暂无。
@@ -103,6 +120,10 @@ pub(crate) struct GitGraphView {
     detail_resizable_state: ResizableStateHandle,
     /// 详情区关闭按钮的鼠标状态。
     detail_close_mouse_state: MouseStateHandle,
+    /// 详情区文本选区状态（拖拽框选），跨重渲染保持。
+    detail_selection_handle: SelectionHandle,
+    /// 详情区当前选中的文本，供 Cmd/Ctrl+C 复制；由 [`SelectableArea`] 的回调写入。
+    detail_selected_text: Arc<RwLock<Option<String>>>,
 }
 
 /// 空布局，用于未加载/出错时。
@@ -140,6 +161,8 @@ impl GitGraphView {
             loading_shimmer: ShimmeringTextStateHandle::new(),
             detail_resizable_state: resizable_state_handle(220.0),
             detail_close_mouse_state: MouseStateHandle::default(),
+            detail_selection_handle: SelectionHandle::default(),
+            detail_selected_text: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -160,6 +183,15 @@ impl GitGraphView {
     fn clear_selection(&mut self) {
         self.selected = None;
         self.detail = DetailState::None;
+        self.clear_detail_text_selection();
+    }
+
+    /// 清空详情区的文本框选状态（切换提交/关闭详情时调用，避免旧选区坐标残留）。
+    fn clear_detail_text_selection(&mut self) {
+        self.detail_selection_handle.clear();
+        if let Ok(mut guard) = self.detail_selected_text.write() {
+            *guard = None;
+        }
     }
 
     /// 重新加载当前工作目录的提交图谱。
@@ -288,6 +320,7 @@ impl GitGraphView {
         let hash = commit.hash.clone();
         self.selected = Some(index);
         self.detail = DetailState::Loading;
+        self.clear_detail_text_selection();
         ctx.notify();
 
         #[cfg(not(target_family = "wasm"))]
@@ -327,6 +360,7 @@ impl GitGraphView {
         let mouse_states = self.row_mouse_states.clone();
         let has_more = self.has_more;
         let shimmer = self.loading_shimmer.clone();
+        let selected = self.selected;
         let commit_count = commits.len();
         let total = commit_count + usize::from(has_more);
 
@@ -340,12 +374,25 @@ impl GitGraphView {
                         let row = layout.rows.get(i)?;
                         let element = render_graph_row(row, lane_count, commit, appearance);
                         let state = mouse_states.get(i).cloned().unwrap_or_default();
+                        let is_selected = selected == Some(i);
                         Some(
-                            Hoverable::new(state, move |_| element)
-                                .on_click(move |ctx, _, _| {
-                                    ctx.dispatch_typed_action(GitGraphAction::SelectCommit(i));
-                                })
-                                .finish(),
+                            // 悬停/选中时套一层高亮背景（复用左侧面板列表通用的 [`ItemHighlightState`]：
+                            // 悬停淡、选中略深，随鼠标进出即时切换）。
+                            Hoverable::new(state, move |mouse_state| {
+                                let highlight = ItemHighlightState::new(is_selected, mouse_state);
+                                let mut container = Container::new(element);
+                                if let Some(bg) = highlight.background_color(appearance) {
+                                    container = container.with_background_color(bg.into_solid());
+                                }
+                                if let Some(radius) = highlight.corner_radius() {
+                                    container = container.with_corner_radius(radius);
+                                }
+                                container.finish()
+                            })
+                            .on_click(move |ctx, _, _| {
+                                ctx.dispatch_typed_action(GitGraphAction::SelectCommit(i));
+                            })
+                            .finish(),
                         )
                     } else {
                         // 末行：加载更多指示（闪烁动画，滚动到此自动触发加载）。
@@ -388,7 +435,14 @@ impl GitGraphView {
             }
             DetailState::Loaded(detail) => {
                 let commit = self.selected.and_then(|i| self.commits.get(i));
-                render_detail_body(commit, detail, &self.detail_list_state, appearance)
+                render_detail_body(
+                    commit,
+                    detail,
+                    &self.detail_list_state,
+                    self.detail_selection_handle.clone(),
+                    self.detail_selected_text.clone(),
+                    appearance,
+                )
             }
         };
 
@@ -588,48 +642,57 @@ fn render_ref_badge(label: &RefLabel, appearance: &Appearance) -> Box<dyn Elemen
     Container::new(badge).with_padding_right(4.).finish()
 }
 
-/// 渲染详情区主体：元信息 + 完整信息 + 变更文件列表。
+/// 渲染详情区主体：可框选的元信息文本块 + 变更文件列表。
+///
+/// 元信息（完整 hash + 作者 + 提交者 + 提交信息）合并成单个可选 [`Text`]，外包
+/// [`SelectableArea`] 以支持拖拽框选；选中文本写入 `selected_text`，由 Cmd/Ctrl+C
+/// 复制。文件列表是虚拟化的，暂不参与框选。
 fn render_detail_body(
     commit: Option<&CommitNode>,
     detail: &CommitDetail,
     list_state: &UniformListState,
+    selection_handle: SelectionHandle,
+    selected_text: Arc<RwLock<Option<String>>>,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let font = appearance.ui_font_family();
     let size = appearance.ui_font_size();
 
-    let mut meta = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Start);
+    // 把各段元信息拼成一个多行字符串：hash / 作者 / 提交者（若不同）/ 空行 / 完整信息。
+    let mut meta_text = String::new();
     if let Some(c) = commit {
-        meta = meta.with_child(text_line(c.hash.clone(), appearance, true));
-        meta = meta.with_child(text_line(
-            format!("{} <{}>", c.author_name, c.author_email),
-            appearance,
-            false,
-        ));
+        meta_text.push_str(&c.hash);
+        meta_text.push('\n');
+        meta_text.push_str(&format!("{} <{}>", c.author_name, c.author_email));
         if detail.committer_name != c.author_name {
-            meta = meta.with_child(text_line(
-                format!("committed by {}", detail.committer_name),
-                appearance,
-                true,
-            ));
+            meta_text.push('\n');
+            meta_text.push_str(&format!("committed by {}", detail.committer_name));
         }
+        meta_text.push('\n');
     }
+    meta_text.push('\n');
+    meta_text.push_str(detail.message.trim_end());
 
-    // 完整提交信息（可换行）。
-    meta = meta.with_child(
-        Container::new(
-            Text::new(detail.message.clone(), font, size)
-                .with_color(appearance.theme().foreground().into())
-                .finish(),
-        )
-        .with_vertical_padding(6.)
-        .finish(),
-    );
-    meta = meta.with_child(text_line(
+    let meta_element = Text::new(meta_text, font, size)
+        .with_color(appearance.theme().foreground().into())
+        .with_selectable(true)
+        .finish();
+    let selectable_meta = SelectableArea::new(
+        selection_handle,
+        move |args, _, _| {
+            if let Ok(mut guard) = selected_text.write() {
+                *guard = args.selection;
+            }
+        },
+        meta_element,
+    )
+    .finish();
+
+    let files_label = text_line(
         format!("{} changed files", detail.files.len()),
         appearance,
         true,
-    ));
+    );
 
     // 文件列表（虚拟化、可滚动）。
     let files = Arc::new(detail.files.clone());
@@ -644,7 +707,9 @@ fn render_detail_body(
     Container::new(
         Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
-            .with_child(meta.finish())
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(Container::new(selectable_meta).with_vertical_padding(6.).finish())
+            .with_child(files_label)
             .with_child(Shrinkable::new(1.0, file_list.finish()).finish())
             .finish(),
     )
@@ -699,6 +764,17 @@ impl TypedActionView for GitGraphView {
             GitGraphAction::CloseDetail => {
                 self.clear_selection();
                 ctx.notify();
+            }
+            GitGraphAction::CopySelection => {
+                let text = self
+                    .detail_selected_text
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.clone())
+                    .filter(|t| !t.is_empty());
+                if let Some(text) = text {
+                    ctx.clipboard().write(ClipboardContent::plain_text(text));
+                }
             }
         }
     }

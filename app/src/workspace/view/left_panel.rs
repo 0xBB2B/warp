@@ -664,6 +664,14 @@ impl LeftPanelView {
             view.set_root_directories(local_paths.clone(), view_ctx);
         });
 
+        // Git Graph 跟随最近一个本地工作目录；切换活跃 pane group 时也要刷新，否则会停留在
+        // 上一个目录的状态（与 DirectoriesChanged 处理保持一致）。
+        let git_graph_dir = local_paths.first().cloned();
+        let git_graph_view = self.git_graph_view.clone();
+        git_graph_view.update(ctx, |view, ctx| {
+            view.set_working_directory(git_graph_dir, ctx);
+        });
+
         let local_directories = deduplicate_by_directory_name(local_paths);
         let active_file_model = pane_group.as_ref(ctx).active_file_model().clone();
 

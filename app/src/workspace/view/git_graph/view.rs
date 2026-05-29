@@ -16,10 +16,10 @@ use warpui::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
 use warpui::elements::{
-    resizable_state_handle, Container, CornerRadius, CrossAxisAlignment, DragBarSide, Element, Empty,
-    Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, ParentElement, Radius,
-    Resizable, ResizableStateHandle, SelectableArea, SelectionHandle, Shrinkable, Text, UniformList,
-    UniformListState,
+    resizable_state_handle, Align, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
+    DragBarSide, Element, Empty, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle,
+    ParentElement, Radius, Resizable, ResizableStateHandle, SelectableArea, SelectionHandle,
+    Shrinkable, Text, UniformList, UniformListState,
 };
 use warpui::keymap::macros::id;
 use warpui::keymap::FixedBinding;
@@ -199,6 +199,9 @@ impl GitGraphView {
         self.clear_selection();
         self.has_more = false;
         self.loading_more = false;
+        // 重新加载会把提交重置回第一页，滚动位置也回到顶部（顶部即最新提交），
+        // 否则用户滚到下面刷新后会停在中下部，被迫手动滚回。
+        self.list_state.scroll_to(0);
 
         let Some(dir) = self.working_dir.clone() else {
             self.commits = Arc::new(Vec::new());
@@ -237,7 +240,14 @@ impl GitGraphView {
                             view.layout = Arc::new(empty_layout());
                             view.row_mouse_states = Arc::new(Vec::new());
                             view.has_more = false;
-                            view.state = LoadState::Error(err.to_string());
+                            let raw = err.to_string();
+                            // 目录不在任何 git 仓库内时 `git log` 会报 "not a git repository"，
+                            // 这不是错误，归一到 NoRepo 占位（而非展示吓人的原始报错）。
+                            view.state = if raw.contains("not a git repository") {
+                                LoadState::NoRepo
+                            } else {
+                                LoadState::Error(clean_git_error(&raw))
+                            };
                         }
                     }
                     ctx.notify();
@@ -552,12 +562,73 @@ fn render_loading_more_row(
         .finish()
 }
 
-/// 渲染居中的单行提示文案（用于空 / 加载中 / 错误等状态）。
+/// 把 `run_git_command` 的原始报错（形如 `Git command failed: <stderr>, <stdout>`）压成
+/// 一行简洁文案：去掉前缀、只取首行、去掉尾部多余的逗号/空白。
+fn clean_git_error(raw: &str) -> String {
+    raw.strip_prefix("Git command failed: ")
+        .unwrap_or(raw)
+        .lines()
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_end_matches(',')
+        .trim()
+        .to_string()
+}
+
+/// 渲染详情区内的小提示文案（左对齐单行，用于详情加载中 / 出错）。
 fn render_message(text: String, appearance: &Appearance) -> Box<dyn Element> {
     Container::new(text_line(text, appearance, true))
         .with_horizontal_padding(12.)
         .with_vertical_padding(8.)
         .finish()
+}
+
+/// 渲染整块面板的占位状态：在剩余空间内垂直 + 水平居中，可选一个装饰图标、必有标题、
+/// 可选副标题。用于 NoRepo / Loading / Error / 空仓库等"整屏"状态，避免文字挤在左上角。
+fn render_centered_placeholder(
+    icon: Option<Icon>,
+    title: String,
+    subtitle: Option<String>,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    // 内容块：图标/标题/副标题竖向堆叠、彼此水平居中（默认 MainAxisSize::Min，按内容收缩）。
+    let mut content = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Center);
+
+    if let Some(icon) = icon {
+        let icon_el = ConstrainedBox::new(
+            icon.to_warpui_icon(theme.sub_text_color(theme.background()))
+                .finish(),
+        )
+        .with_width(32.)
+        .with_height(32.)
+        .finish();
+        content = content.with_child(Container::new(icon_el).with_vertical_padding(8.).finish());
+    }
+
+    content = content.with_child(
+        Text::new_inline(title, appearance.ui_font_family(), appearance.ui_font_size())
+            .with_color(theme.foreground().into())
+            .finish(),
+    );
+
+    if let Some(subtitle) = subtitle {
+        content = content.with_child(
+            Container::new(
+                Text::new(subtitle, appearance.ui_font_family(), appearance.ui_font_size())
+                    .with_color(theme.sub_text_color(theme.background()).into())
+                    .finish(),
+            )
+            .with_vertical_padding(4.)
+            .with_horizontal_padding(24.)
+            .finish(),
+        );
+    }
+
+    // Shrinkable 占满剩余空间（外层是 MainAxisSize::Max column），Align 在该空间内把内容块
+    // 两轴居中——这才有可居中的宽度，单靠 Flex 的 CrossAxisAlignment 会因列宽只裹文字而无效。
+    Shrinkable::new(1.0, Align::new(content.finish()).finish()).finish()
 }
 
 /// 渲染一行图谱：左侧泳道绘制 + 右侧提交文字。
@@ -801,19 +872,31 @@ impl View for GitGraphView {
         }
 
         column = match &self.state {
-            LoadState::NoRepo => column.with_child(render_message(
-                "Current directory is not a git repository".to_string(),
+            LoadState::NoRepo => column.with_child(render_centered_placeholder(
+                Some(Icon::GitBranch),
+                "Not a Git repository".to_string(),
+                None,
                 appearance,
             )),
-            LoadState::Loading => {
-                column.with_child(render_message("Loading commit history…".to_string(), appearance))
-            }
-            LoadState::Error(err) => column.with_child(render_message(
-                format!("Failed to load git history: {err}"),
+            LoadState::Loading => column.with_child(render_centered_placeholder(
+                None,
+                "Loading commit history…".to_string(),
+                None,
+                appearance,
+            )),
+            LoadState::Error(err) => column.with_child(render_centered_placeholder(
+                None,
+                "Failed to load git history".to_string(),
+                Some(err.clone()),
                 appearance,
             )),
             LoadState::Loaded if self.commits.is_empty() => {
-                column.with_child(render_message("No commits yet".to_string(), appearance))
+                column.with_child(render_centered_placeholder(
+                    None,
+                    "No commits yet".to_string(),
+                    None,
+                    appearance,
+                ))
             }
             LoadState::Loaded if self.selected.is_some() => column
                 // 列表填充上方空间；详情区高度可拖动（顶部拖条）。

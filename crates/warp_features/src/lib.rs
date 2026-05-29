@@ -879,6 +879,9 @@ pub enum FeatureFlag {
 
     /// Gates the Grouped Tabs feature.
     GroupedTabs,
+
+    /// Gates the read-only Git Graph (commit DAG) tab in the left panel.
+    GitGraph,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -945,6 +948,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::RemoteCodebaseIndexing,
     FeatureFlag::GroupedTabs,
     FeatureFlag::AsyncFind,
+    FeatureFlag::GitGraph,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

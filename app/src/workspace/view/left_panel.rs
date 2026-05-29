@@ -50,14 +50,16 @@ use crate::util::openable_file_type::FileTarget;
 use crate::workspace::view::conversation_list::view::{
     ConversationListView, Event as ConversationListViewEvent,
 };
+use crate::workspace::view::git_graph::GitGraphView;
 use crate::workspace::view::global_search::view::{
     Event as GlobalSearchViewEvent, GlobalSearchEntryFocus, GlobalSearchView,
 };
 use crate::workspace::view::{
-    LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME,
-    LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME, LEFT_PANEL_WARP_DRIVE_BINDING_NAME,
-    OPEN_GLOBAL_SEARCH_BINDING_NAME, TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME,
-    TOGGLE_PROJECT_EXPLORER_BINDING_NAME, TOGGLE_WARP_DRIVE_BINDING_NAME,
+    LEFT_PANEL_AGENT_CONVERSATIONS_BINDING_NAME, LEFT_PANEL_GIT_GRAPH_BINDING_NAME,
+    LEFT_PANEL_GLOBAL_SEARCH_BINDING_NAME, LEFT_PANEL_PROJECT_EXPLORER_BINDING_NAME,
+    LEFT_PANEL_WARP_DRIVE_BINDING_NAME, OPEN_GLOBAL_SEARCH_BINDING_NAME,
+    TOGGLE_CONVERSATION_LIST_VIEW_BINDING_NAME, TOGGLE_PROJECT_EXPLORER_BINDING_NAME,
+    TOGGLE_WARP_DRIVE_BINDING_NAME,
 };
 use crate::workspace::WorkspaceAction;
 use crate::TelemetryEvent;
@@ -76,6 +78,7 @@ pub enum LeftPanelAction {
     GlobalSearch { entry_focus: GlobalSearchEntryFocus },
     WarpDrive,
     ConversationListView,
+    GitGraph,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -103,6 +106,7 @@ pub enum ToolPanelView {
     GlobalSearch { entry_focus: GlobalSearchEntryFocus },
     WarpDrive,
     ConversationListView,
+    GitGraph,
 }
 
 /// Encapsulates the active view state to enforce that all mutations go through
@@ -170,6 +174,7 @@ pub struct LeftPanelView {
     close_button_mouse_state: MouseStateHandle,
     warp_drive_view: ViewHandle<DrivePanel>,
     conversation_list_view: ViewHandle<ConversationListView>,
+    git_graph_view: ViewHandle<GitGraphView>,
     active_view: active_view_state::ActiveViewState,
     toolbelt_buttons: Vec<ToolbeltButtonConfig>,
     active_pane_group: Option<WeakViewHandle<PaneGroup>>,
@@ -214,6 +219,7 @@ impl LeftPanelView {
         };
         let warp_drive_view = ctx.add_typed_action_view(DrivePanel::new);
         let conversation_list_view = ctx.add_typed_action_view(ConversationListView::new);
+        let git_graph_view = ctx.add_view(GitGraphView::new);
 
         ctx.subscribe_to_view(&warp_drive_view, |_me, _, event, ctx| {
             ctx.emit(LeftPanelEvent::WarpDrive(event.clone()));
@@ -299,6 +305,9 @@ impl LeftPanelView {
                     view.set_root_directories(local_paths.clone(), view_ctx);
                 });
 
+                // Git Graph 跟随最近一个本地工作目录（git 可从仓库任意子目录读取历史）。
+                let git_graph_dir = local_paths.first().cloned();
+
                 // Directories are already in display order (most recent first) from the model
                 let local_directories = deduplicate_by_directory_name(local_paths);
                 let file_tree_view =
@@ -317,6 +326,11 @@ impl LeftPanelView {
                         view.auto_expand_to_most_recent_directory(ctx);
                     }
                 });
+
+                let git_graph_view = me.git_graph_view.clone();
+                git_graph_view.update(ctx, |view, ctx| {
+                    view.set_working_directory(git_graph_dir, ctx);
+                });
                 ctx.notify();
             }
         });
@@ -327,6 +341,7 @@ impl LeftPanelView {
             close_button_mouse_state: Default::default(),
             warp_drive_view,
             conversation_list_view,
+            git_graph_view,
             active_view: active_view_state::new(active_view),
             toolbelt_buttons,
             active_pane_group: None,
@@ -454,6 +469,19 @@ impl LeftPanelView {
                     active_icon: Some(Icon::Conversation),
                     tooltip_text: "Agent conversations".to_string(),
                     action: LeftPanelAction::ConversationListView,
+                    render_with_active_state: false,
+                    tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
+                    tooltip_keybinding_names,
+                }
+            }
+            ToolPanelView::GitGraph => {
+                let tooltip_keybinding_names = vec![LEFT_PANEL_GIT_GRAPH_BINDING_NAME];
+
+                ToolbeltButtonConfig {
+                    icon: Icon::GitBranch,
+                    active_icon: None,
+                    tooltip_text: "Git Graph".to_string(),
+                    action: LeftPanelAction::GitGraph,
                     render_with_active_state: false,
                     tooltip_keybinding: toolbelt_tooltip_keybinding(&tooltip_keybinding_names, ctx),
                     tooltip_keybinding_names,
@@ -717,6 +745,7 @@ impl LeftPanelView {
                     view.on_left_panel_focused(ctx);
                 });
             }
+            ToolPanelView::GitGraph => ctx.focus(&self.git_graph_view),
         }
     }
 
@@ -869,6 +898,7 @@ impl LeftPanelView {
                 LeftPanelAction::ConversationListView => {
                     self.active_view.get() == ToolPanelView::ConversationListView
                 }
+                LeftPanelAction::GitGraph => self.active_view.get() == ToolPanelView::GitGraph,
             };
         }
     }
@@ -1010,6 +1040,9 @@ impl LeftPanelView {
                 active_view_state::set(self, ToolPanelView::ConversationListView, ctx);
                 send_telemetry_from_ctx!(TelemetryEvent::ConversationListViewOpened, ctx);
             }
+            LeftPanelAction::GitGraph => {
+                active_view_state::set(self, ToolPanelView::GitGraph, ctx);
+            }
         }
     }
 
@@ -1109,6 +1142,7 @@ impl View for LeftPanelView {
                 }
                 ToolPanelView::WarpDrive => ctx.focus(&self.warp_drive_view),
                 ToolPanelView::ConversationListView => ctx.focus(&self.conversation_list_view),
+                ToolPanelView::GitGraph => ctx.focus(&self.git_graph_view),
             }
         }
     }
@@ -1181,6 +1215,14 @@ impl View for LeftPanelView {
             ToolPanelView::ConversationListView => {
                 Shrinkable::new(1.0, ChildView::new(&self.conversation_list_view).finish()).finish()
             }
+            ToolPanelView::GitGraph => Shrinkable::new(
+                1.0,
+                Container::new(ChildView::new(&self.git_graph_view).finish())
+                    .with_padding_left(2.)
+                    .with_padding_right(2.)
+                    .finish(),
+            )
+            .finish(),
         };
 
         let panel_content = Container::new({

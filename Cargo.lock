@@ -7992,21 +7992,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metal"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7047791b5bc903b8cd963014b355f71dc9864a9a0b727057676c1dcae5cbc15"
-dependencies = [
- "bitflags 2.9.4",
- "block",
- "core-graphics-types 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "foreign-types 0.5.0",
- "log",
- "objc",
- "paste",
-]
-
-[[package]]
 name = "migrations_internals"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8785,6 +8770,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]
@@ -9009,6 +8995,7 @@ checksum = "a0125f776a10d00af4152d74616409f0d4a2053a6f57fa5b7d6aa2854ac04794"
 dependencies = [
  "bitflags 2.9.4",
  "block2 0.6.2",
+ "dispatch2",
  "objc2 0.6.3",
  "objc2-foundation 0.3.2",
 ]
@@ -15249,12 +15236,12 @@ dependencies = [
  "derive_more 0.99.17",
  "dirs 6.0.0",
  "dispatch",
+ "dispatch2",
  "dwrote",
  "env_logger",
  "font-kit",
  "fontconfig",
  "fontdb",
- "foreign-types 0.5.0",
  "futures",
  "futures-lite 1.13.0",
  "futures-timer",
@@ -15270,7 +15257,6 @@ dependencies = [
  "log",
  "markdown_parser",
  "memmap2 0.9.7",
- "metal",
  "native-dialog",
  "nix 0.26.4",
  "notify-rust",
@@ -15279,6 +15265,8 @@ dependencies = [
  "objc2 0.6.3",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "open",
  "ordered-float 3.9.2",
  "owned_ttf_parser",

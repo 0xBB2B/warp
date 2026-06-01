@@ -1638,9 +1638,14 @@ fn render_detail_body(
     }
     content = content.with_child(files_section);
 
+    // overlay 滚动条铺在内容右缘 8px 上，给内容留出「滚动条宽度 + 呼吸间隙」的右内边距，
+    // 否则会遮住文件行右对齐的 `-N` 删除数，或让数字紧贴滚动条。
+    let content = Container::new(content.finish())
+        .with_padding_right(ScrollbarWidth::Auto.as_f32() + 6.)
+        .finish();
     let scrollable = ClippedScrollable::vertical(
         scroll_state,
-        content.finish(),
+        content,
         ScrollbarWidth::Auto,
         theme.nonactive_ui_detail().into(),
         theme.active_ui_detail().into(),

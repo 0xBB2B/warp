@@ -1,4 +1,3 @@
-use std::mem;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use pathfinder_color::ColorU;
@@ -31,7 +30,8 @@ pub struct Resizable {
     resize_handler: Option<Handler>,
     start_resize_handler: Option<Handler>,
     end_resize_handler: Option<Handler>,
-    hovering_dragbar: bool,
+    /// 鼠标悬停拖条或正在拖动时绘制的颜色；`None` 时始终用 `dragbar.color`（默认行为）。
+    dragbar_hover_color: Option<Fill>,
     direction: ResizeDirection,
     origin_delta: Vector2F,
     dragbar_offset: f32,
@@ -51,6 +51,10 @@ pub struct ResizableState {
     size: f32,
     bounds: Option<(f32, f32)>,
     mode: ResizableMode,
+    /// 鼠标是否悬停在拖条上。存于此共享状态（而非 `Resizable` 本地字段）以便跨重渲染保留：
+    /// hover 翻转会 `notify` 触发重渲染，重渲染会重建 `Resizable`，本地字段随之丢失、
+    /// hover 高亮立刻消失；而拖动态（`mode`）本就在此，所以拖动高亮一直正常。
+    hovering_dragbar: bool,
 }
 
 #[derive(Default)]
@@ -68,6 +72,7 @@ impl ResizableState {
             size,
             bounds: None,
             mode: Default::default(),
+            hovering_dragbar: false,
         }
     }
     pub fn size(&self) -> f32 {
@@ -223,7 +228,7 @@ impl Resizable {
             start_resize_handler: None,
             end_resize_handler: None,
             dragbar: Dragbar::new(),
-            hovering_dragbar: false,
+            dragbar_hover_color: None,
             direction: ResizeDirection::Horizontal,
             origin_delta: Vector2F::zero(),
             dragbar_offset: 0.0,
@@ -265,6 +270,12 @@ impl Resizable {
 
     pub fn with_dragbar_color(mut self, color: Fill) -> Self {
         self.dragbar.color = color;
+        self
+    }
+
+    /// 设置鼠标悬停拖条或正在拖动时的高亮颜色，让原本不可见 / 无反馈的拖条变明显。
+    pub fn with_dragbar_hover_color(mut self, color: Fill) -> Self {
+        self.dragbar_hover_color = Some(color);
         self
     }
 
@@ -397,9 +408,18 @@ impl Element for Resizable {
             ),
         };
 
+        // 悬停拖条或正在拖动时用高亮色（若设置），否则用常规拖条色。
+        let is_active = {
+            let s = self.state();
+            s.hovering_dragbar || s.is_resizing()
+        };
+        let dragbar_color = match self.dragbar_hover_color {
+            Some(hover) if is_active => hover,
+            _ => self.dragbar.color,
+        };
         ctx.scene
             .draw_rect_with_hit_recording(RectF::new(dragbar_origin, dragbar_size))
-            .with_background(self.dragbar.color);
+            .with_background(dragbar_color);
 
         self.dragbar.bounds = Some(RectF::new(dragbar_origin, dragbar_size));
         self.dragbar.origin = Some(Point::from_vec2f(dragbar_origin, ctx.scene.z_index()));
@@ -463,8 +483,12 @@ impl Element for Resizable {
                     return false;
                 };
                 let hovering_dragbar = self.is_mouse_hovering_dragbar(ctx, *position);
-                let was_already_hovering =
-                    mem::replace(&mut self.hovering_dragbar, hovering_dragbar);
+                let was_already_hovering = {
+                    let mut s = self.state();
+                    let prev = s.hovering_dragbar;
+                    s.hovering_dragbar = hovering_dragbar;
+                    prev
+                };
 
                 if hovering_dragbar && !was_already_hovering {
                     let cursor = match self.direction {
@@ -474,6 +498,11 @@ impl Element for Resizable {
                     ctx.set_cursor(cursor, z_index);
                 } else if !hovering_dragbar && was_already_hovering {
                     ctx.reset_cursor();
+                }
+
+                // 悬停状态翻转且设置了高亮色时，通知重绘以即时切换拖条颜色。
+                if hovering_dragbar != was_already_hovering && self.dragbar_hover_color.is_some() {
+                    ctx.notify();
                 }
 
                 return true;

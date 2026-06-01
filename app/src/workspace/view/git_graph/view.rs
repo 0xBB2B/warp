@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_channel::Sender;
@@ -189,8 +190,12 @@ pub(crate) struct GitGraphView {
     visible_range_sender: Sender<Range<usize>>,
     /// 底部"加载更多"指示行的闪烁动画状态。
     loading_shimmer: ShimmeringTextStateHandle,
-    /// 详情区高度的可拖动状态。
+    /// 详情区高度的可拖动状态。初始像素值仅为占位，首帧 layout 时由
+    /// [`Self::render_resizable_detail`] 的 bounds 回调按窗口高度覆盖为 1/3。
     detail_resizable_state: ResizableStateHandle,
+    /// 详情区高度是否已做过"首次打开默认 1/3"初始化：仅初始化一次，
+    /// 之后保持用户拖动出的高度。
+    detail_height_initialized: Arc<AtomicBool>,
     /// 详情区关闭按钮的鼠标状态。
     detail_close_mouse_state: MouseStateHandle,
     /// 详情区文本选区状态（拖拽框选），跨重渲染保持。
@@ -261,6 +266,7 @@ impl GitGraphView {
             visible_range_sender,
             loading_shimmer: ShimmeringTextStateHandle::new(),
             detail_resizable_state: resizable_state_handle(220.0),
+            detail_height_initialized: Arc::new(AtomicBool::new(false)),
             detail_close_mouse_state: MouseStateHandle::default(),
             detail_selection_handle: SelectionHandle::default(),
             detail_selected_text: Arc::new(RwLock::new(None)),
@@ -828,17 +834,30 @@ impl GitGraphView {
 
     /// 把详情区包进可拖动高度的 [`Resizable`]（顶部拖条上下拉），列表占其余空间。
     fn render_resizable_detail(&self, appearance: &Appearance) -> Box<dyn Element> {
+        // 顶部 5px 拖条本身透明，hover / 拖动时用中性叠加色高亮，提示此处可上下拖动。
+        // internal_colors 返回的是 theme::Fill，需转成 warpui elements::Fill。
+        let dragbar_hover_color: Fill = internal_colors::fg_overlay_5(appearance.theme()).into();
+        let state = self.detail_resizable_state.clone();
+        let initialized = self.detail_height_initialized.clone();
         Resizable::new(
             self.detail_resizable_state.clone(),
             self.render_detail(appearance),
         )
         .with_dragbar_side(DragBarSide::Top)
+        .with_dragbar_hover_color(dragbar_hover_color)
         .on_resize(move |ctx, _| {
             ctx.notify();
         })
-        .with_bounds_callback(Box::new(|window_size| {
+        .with_bounds_callback(Box::new(move |window_size| {
             let min = 100.0;
             let max = (window_size.y() * 0.7).max(min);
+            // 详情区第一次出现时默认占窗口高度的 1/3（首帧 layout 即生效，无闪烁）；
+            // 之后保持用户拖动出的高度，不再覆盖。
+            if !initialized.swap(true, Ordering::Relaxed) {
+                if let Ok(mut s) = state.lock() {
+                    s.set_size((window_size.y() / 3.0).clamp(min, max));
+                }
+            }
             (min, max)
         }))
         .finish()

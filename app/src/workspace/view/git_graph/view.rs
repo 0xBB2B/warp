@@ -11,6 +11,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_channel::Sender;
 use pathfinder_color::ColorU;
@@ -21,7 +22,8 @@ use warpui::elements::shimmering_text::{
 use warpui::elements::{
     resizable_state_handle, Align, Border, ChildAnchor, ChildView, ClippedScrollStateHandle,
     ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
-    DragBarSide, Element, Empty, Expanded, Fill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
+    DragBarSide, Element, Empty, Expanded, Fill, Flex, Highlight, Hoverable, MainAxisAlignment,
+    MainAxisSize,
     MouseStateHandle, OffsetPositioning, ParentElement, PositionedElementAnchor,
     PositionedElementOffsetBounds, Radius, Resizable, ResizableStateHandle, SavePosition,
     ScrollbarWidth, SelectableArea, SelectionHandle, Shrinkable, Stack, Text, UniformList,
@@ -31,7 +33,8 @@ use warpui::geometry::vector::vec2f;
 use warpui::keymap::macros::id;
 use warpui::keymap::FixedBinding;
 use warpui::scene::DropShadow;
-use warpui::text_layout::ClipConfig;
+use warpui::fonts::{Properties, Weight};
+use warpui::text_layout::{ClipConfig, ClipDirection, ClipStyle};
 use warpui::units::Pixels;
 use warpui::{
     AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle,
@@ -45,6 +48,7 @@ use super::data::{BranchRef, ChangedFile, CommitDetail, CommitNode, RefKind, Ref
 use super::layout::{assign_lanes, GraphLayout, GraphRow};
 use super::row_canvas::GitGraphRowCanvas;
 use crate::appearance::Appearance;
+use crate::code::editor::{add_color, remove_color};
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::settings::{GitSettings, GitSettingsChangedEvent};
 use crate::ui_components::buttons::icon_button;
@@ -91,6 +95,9 @@ pub(crate) enum GitGraphAction {
     CloseDetail,
     /// 把详情区当前选中的文本复制到剪贴板（Cmd/Ctrl+C）。
     CopySelection,
+    /// 把键盘焦点收到本视图（详情区开始框选时派发）。框选靠命中测试、不改焦点，若焦点此前
+    /// 已离开（如粘贴到编辑器、点了别处），不重新聚焦会使后续 Cmd/Ctrl+C 派发不到本视图。
+    FocusPanel,
     /// 在主区只读 diff pane 中打开详情区第 N 个变更文件的改动。
     OpenFileDiff(usize),
 }
@@ -683,6 +690,11 @@ impl GitGraphView {
 
     /// 选中某行并异步加载其详情。
     fn select_commit(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        // 把键盘焦点收到本视图，使其进入责任链——这是详情区 `cmdorctrl-c` →
+        // [`GitGraphAction::CopySelection`] 绑定生效的前提（键盘绑定只对焦点链上的视图触发，
+        // 而鼠标框选靠命中测试、不依赖焦点，故"能选中却复制不了"）。选中提交是查看 / 复制
+        // 详情的必经入口，在此自举焦点即可覆盖框选复制流程；点回终端时焦点自然交还。
+        ctx.focus_self();
         let Some(commit) = self.commits.get(index) else {
             return;
         };
@@ -1413,11 +1425,70 @@ fn render_ref_badge(label: &RefLabel, appearance: &Appearance) -> Box<dyn Elemen
     Container::new(badge).with_padding_right(4.).finish()
 }
 
-/// 渲染详情区主体：可框选的元信息文本块 + 变更文件列表。
+/// 把 Unix 秒时间戳转成中文相对时间（刚刚 / N 分钟前 / N 小时前 / N 天前 / N 个月前 / N 年前）。
+/// 用系统当前时间计算；时钟回拨等导致的负差值兜底为"刚刚"。
+fn relative_time(unix_secs: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(unix_secs);
+    let diff = now - unix_secs;
+    match diff {
+        i64::MIN..=59 => "刚刚".to_string(),
+        60..=3_599 => format!("{} 分钟前", diff / 60),
+        3_600..=86_399 => format!("{} 小时前", diff / 3_600),
+        86_400..=2_591_999 => format!("{} 天前", diff / 86_400),
+        2_592_000..=31_103_999 => format!("{} 个月前", diff / 2_592_000),
+        _ => format!("{} 年前", diff / 31_536_000),
+    }
+}
+
+/// 取提交完整信息（`%B`）去掉首行（已作为标题展示）后的正文：首行后通常跟一个空行，
+/// 一并去除，再去尾空白。无正文时返回空串。
+fn detail_message_body(message: &str) -> String {
+    match message.trim_end().split_once('\n') {
+        Some((_subject, rest)) => rest.trim_start_matches('\n').trim_end().to_string(),
+        None => String::new(),
+    }
+}
+
+/// 渲染一组红绿增删计数：`+N` 用增色、`-N` 用删色（与点击打开的 diff 编辑器同源配色）。
+/// `add_width` / `del_width` 是数字按最大位数右对齐的字符宽度——文件行传入本提交的全局最大位数，
+/// 配合 monospace 字体让各行的 `+`、`-` 跨行对齐成列；单行场景（如汇总）传各自位数即可。
+fn render_diff_counts(
+    additions: u32,
+    deletions: u32,
+    add_width: usize,
+    del_width: usize,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let font = appearance.monospace_font_family();
+    let size = appearance.ui_font_size();
+    Flex::row()
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Text::new_inline(format!("+{:>add_width$}", additions), font, size)
+                .with_color(add_color(appearance))
+                .finish(),
+        )
+        .with_child(
+            Container::new(
+                Text::new_inline(format!("-{:>del_width$}", deletions), font, size)
+                    .with_color(remove_color(appearance))
+                    .finish(),
+            )
+            .with_padding_left(8.)
+            .finish(),
+        )
+        .finish()
+}
+
+/// 渲染详情区主体：分层的提交元信息（标题 / 作者·时间 /（提交者）/ 短 hash / 正文）
+/// + 引用徽标 + 变更文件区。
 ///
-/// 元信息（完整 hash + 作者 + 提交者 + 提交信息）合并成单个可选 [`Text`]，外包
-/// [`SelectableArea`] 以支持拖拽框选；选中文本写入 `selected_text`，由 Cmd/Ctrl+C
-/// 复制。文件列表是虚拟化的，暂不参与框选。
+/// 元信息各段拆成独立 [`Text`] 以建立视觉层级（标题加粗、作者与 hash 弱色），整列包进
+/// 同一个 [`SelectableArea`]——它支持跨元素框选，故拖拽仍能选中多段，选中文本写入
+/// `selected_text` 由 Cmd/Ctrl+C 复制。引用徽标与文件区在 SelectableArea 之外，不参与框选。
 fn render_detail_body(
     commit: Option<&CommitNode>,
     detail: &CommitDetail,
@@ -1427,60 +1498,146 @@ fn render_detail_body(
     file_mouse_states: &[MouseStateHandle],
     appearance: &Appearance,
 ) -> Box<dyn Element> {
+    let theme = appearance.theme();
     let font = appearance.ui_font_family();
     let size = appearance.ui_font_size();
+    let fg: ColorU = theme.foreground().into();
+    let dim: ColorU = theme.sub_text_color(theme.background()).into();
 
-    // 把各段元信息拼成一个多行字符串：hash / 作者 / 提交者（若不同）/ 空行 / 完整信息。
-    let mut meta_text = String::new();
+    // ---- 可框选的元信息：标题（加粗）/ 作者·时间 /（提交者）/ 完整 hash / 正文 ----
+    // 合并成单个 [`Text`] 承载，靠 char-range 高亮做层级。单 Text 是 [`SelectableArea`] 框选
+    // 复制可靠工作的前提——拆成多个 Text 会断开跨段选择，导致拖选后复制不到内容。
+    let subject = commit
+        .map(|c| c.subject.clone())
+        .unwrap_or_else(|| detail.message.lines().next().unwrap_or_default().to_string());
+    let mut meta_text = subject;
+    let subject_chars = meta_text.chars().count();
+
+    // 弱色段：作者·时间 /（提交者·时间）/ 完整 hash。
+    let mut dim_range: Option<Range<usize>> = None;
     if let Some(c) = commit {
-        meta_text.push_str(&c.hash);
-        meta_text.push('\n');
-        meta_text.push_str(&format!("{} <{}>", c.author_name, c.author_email));
+        meta_text.push_str("\n\n");
+        let start = meta_text.chars().count();
+        meta_text.push_str(&format!("{} · {}", c.author_name, relative_time(c.author_time)));
+        // 提交者与作者不同（cherry-pick / rebase / amend 等）才补一行。
         if detail.committer_name != c.author_name {
-            meta_text.push('\n');
-            meta_text.push_str(&format!("committed by {}", detail.committer_name));
+            meta_text.push_str(&format!(
+                "\ncommitted by {} · {}",
+                detail.committer_name,
+                relative_time(detail.committer_time)
+            ));
         }
         meta_text.push('\n');
+        meta_text.push_str(&c.hash);
+        dim_range = Some(start..meta_text.chars().count());
     }
-    meta_text.push('\n');
-    meta_text.push_str(detail.message.trim_end());
 
-    let meta_element = Text::new(meta_text, font, size)
-        .with_color(appearance.theme().foreground().into())
+    // 正文：完整信息去掉已作标题的首行；为空则不追加。
+    let body = detail_message_body(&detail.message);
+    if !body.is_empty() {
+        meta_text.push_str("\n\n");
+        meta_text.push_str(&body);
+    }
+
+    let mut meta = Text::new(meta_text, font, size)
+        .with_color(fg)
         .with_selectable(true)
-        .finish();
+        .with_single_highlight(
+            Highlight::new().with_properties(Properties::default().weight(Weight::Bold)),
+            (0..subject_chars).collect(),
+        );
+    if let Some(range) = dim_range {
+        meta = meta.with_single_highlight(
+            Highlight::new().with_foreground_color(dim),
+            range.collect(),
+        );
+    }
     let selectable_meta = SelectableArea::new(
         selection_handle,
-        move |args, _, _| {
+        move |args, ctx, _| {
+            // 框选从"无"变"有"时把焦点收回本视图：框选靠命中测试、不改焦点，若此前焦点
+            // 已离开（如把上次复制内容粘贴到编辑器、点了别处），不重新聚焦会导致后续
+            // Cmd/Ctrl+C 派发不到 CopySelection（表现为"第一次能复制、之后不能"）。
+            let was_empty = selected_text.read().map(|g| g.is_none()).unwrap_or(true);
+            if was_empty && args.selection.is_some() {
+                ctx.dispatch_typed_action(GitGraphAction::FocusPanel);
+            }
             if let Ok(mut guard) = selected_text.write() {
                 *guard = args.selection;
             }
         },
-        meta_element,
+        meta.finish(),
     )
     .finish();
 
-    let files_label = text_line(
-        format!("{} changed files", detail.files.len()),
-        appearance,
-        true,
-    );
+    // ---- 文件区：顶部分隔线 + 汇总（N files changed / 总增删）+ 文件行 ----
+    let total_add: u32 = detail.files.iter().map(|f| f.additions).sum();
+    let total_del: u32 = detail.files.iter().map(|f| f.deletions).sum();
+    // 各文件行 +/- 按本提交内的最大位数右对齐，跨行成列；汇总行单独一行按总数自身位数即可。
+    let add_width = detail
+        .files
+        .iter()
+        .map(|f| f.additions.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let del_width = detail
+        .files
+        .iter()
+        .map(|f| f.deletions.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let summary = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Text::new_inline(format!("{} files changed", detail.files.len()), font, size)
+                .with_color(dim)
+                .finish(),
+        )
+        .with_child(render_diff_counts(
+            total_add,
+            total_del,
+            total_add.to_string().len(),
+            total_del.to_string().len(),
+            appearance,
+        ))
+        .finish();
 
-    // 提交信息 + 标题 + 全部变更文件行拼成一列，整列交给 [`ClippedScrollable`] 统一滚动。
-    // 不再虚拟化文件列表：单个提交的文件数有限，且把信息与文件放进同一个滚动区域，
-    // 长提交信息才能和文件一起滚动查看完整内容（虚拟化的 UniformList 需要有界视口，
-    // 无法嵌进按自然高度布局的滚动容器）。
-    let mut content = Flex::column()
+    // 不虚拟化文件列表：单个提交的文件数有限，且把信息与文件放进同一个滚动区域，
+    // 长提交信息才能和文件一起滚动查看完整内容。
+    let mut files_col = Flex::column()
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
-        .with_child(Container::new(selectable_meta).with_vertical_padding(6.).finish())
-        .with_child(files_label);
+        .with_child(Container::new(summary).with_vertical_padding(4.).finish());
     for (index, file) in detail.files.iter().enumerate() {
         // 鼠标状态与 files 等长；缺失时退化为不可悬停高亮的默认态（不影响点击）。
         let mouse_state = file_mouse_states.get(index).cloned().unwrap_or_default();
-        content = content.with_child(render_file_row(index, file, mouse_state, appearance));
+        files_col = files_col.with_child(render_file_row(
+            index, file, mouse_state, add_width, del_width, appearance,
+        ));
     }
+    let files_section = Container::new(files_col.finish())
+        .with_border(Border::top(1.).with_border_fill(theme.outline()))
+        .with_margin_top(10.)
+        .with_padding_top(8.)
+        .finish();
 
-    let theme = appearance.theme();
+    let mut content = Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(Container::new(selectable_meta).with_vertical_padding(6.).finish());
+    // 引用徽标（分支 / tag / HEAD 指向本提交时）：窄面板下独占一行，置于元信息与文件区之间。
+    if let Some(c) = commit {
+        if !c.refs.is_empty() {
+            let mut chips = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+            for ref_label in &c.refs {
+                chips = chips.with_child(render_ref_badge(ref_label, appearance));
+            }
+            content =
+                content.with_child(Container::new(chips.finish()).with_padding_bottom(4.).finish());
+        }
+    }
+    content = content.with_child(files_section);
+
     let scrollable = ClippedScrollable::vertical(
         scroll_state,
         content.finish(),
@@ -1498,34 +1655,52 @@ fn render_detail_body(
         .finish()
 }
 
-/// 渲染一个可点击的变更文件行：路径 + `+增 -删`。悬停高亮，点击在主区开只读 diff pane。
+/// 渲染一个可点击的变更文件行：路径（目录弱色、文件名提亮）+ 右侧红绿 `+增 -删`。
+/// 悬停高亮，点击在主区开只读 diff pane。
 fn render_file_row(
     index: usize,
     file: &ChangedFile,
     mouse_state: MouseStateHandle,
+    add_width: usize,
+    del_width: usize,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let font = appearance.ui_font_family();
     let size = appearance.ui_font_size();
     let theme = appearance.theme();
+    let fg: ColorU = theme.foreground().into();
+    let dim: ColorU = theme.sub_text_color(theme.background()).into();
+
+    // 路径整体弱色，仅把文件名（最后一段）提亮为前景色，建立"目录 / 文件名"层级；
+    // 过窄时从左侧裁切（保留更有信息量的文件名），与文件搜索行一致。
+    let path = file.path.clone();
+    let basename_byte = path.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let basename_char_start = path[..basename_byte].chars().count();
+    let total_chars = path.chars().count();
+    let path_text = Text::new_inline(path, font, size)
+        .with_color(dim)
+        .with_single_highlight(
+            Highlight::new().with_foreground_color(fg),
+            (basename_char_start..total_chars).collect(),
+        )
+        .with_clip(ClipConfig {
+            direction: ClipDirection::Start,
+            style: ClipStyle::Ellipsis,
+        })
+        .finish();
+
     let row = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(Expanded::new(1.0, path_text).finish())
         .with_child(
-            Text::new_inline(file.path.clone(), font, size)
-                .with_color(theme.foreground().into())
-                .finish(),
-        )
-        .with_child(
-            Container::new(
-                Text::new_inline(
-                    format!("+{} -{}", file.additions, file.deletions),
-                    font,
-                    size,
-                )
-                .with_color(theme.sub_text_color(theme.background()).into())
-                .finish(),
-            )
+            Container::new(render_diff_counts(
+                file.additions,
+                file.deletions,
+                add_width,
+                del_width,
+                appearance,
+            ))
             .with_padding_left(8.)
             .finish(),
         )
@@ -1594,6 +1769,7 @@ impl TypedActionView for GitGraphView {
                     ctx.clipboard().write(ClipboardContent::plain_text(text));
                 }
             }
+            GitGraphAction::FocusPanel => ctx.focus_self(),
             GitGraphAction::OpenFileDiff(index) => self.open_file_diff(*index, ctx),
         }
     }

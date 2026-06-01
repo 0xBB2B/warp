@@ -105,10 +105,14 @@ impl TerminalView {
     }
 
     pub fn refresh_pane_header(&mut self, ctx: &mut ViewContext<Self>) {
-        let is_active_session = self.is_active_session(ctx);
+        // 仅当本终端既是活跃会话、又是当前聚焦的 pane 时才显示左上角活跃三角。
+        // 焦点切到分屏中的非终端 pane（如只读 diff pane）时，active_session 仍指向本终端
+        // （供新建终端继承 cwd 等用途，不应清空），若只看 is_active_session 会出现"终端与
+        // 被聚焦 pane 同时亮三角"。纯终端场景下被聚焦的终端恒为 active_session，故行为不变。
+        let show_active_pane_indicator = self.is_active_session(ctx) && self.is_pane_focused(ctx);
         self.pane_configuration
             .update(ctx, move |pane_config, ctx| {
-                pane_config.set_show_active_pane_indicator(is_active_session, ctx);
+                pane_config.set_show_active_pane_indicator(show_active_pane_indicator, ctx);
                 pane_config.refresh_pane_header_overflow_menu_items(ctx);
             });
     }

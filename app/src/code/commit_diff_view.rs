@@ -160,6 +160,20 @@ impl CommitDiffView {
 
         diff_view
     }
+
+    /// 根据当前焦点状态刷新左上角"活跃 pane"三角标记（`show_active_pane_indicator`）：
+    /// 仅当本 pane 处于分屏且是焦点 pane 时显示。终端 pane 通过 `is_active_session` 自行驱动
+    /// 该标志，非终端 pane 默认无人驱动，故这里显式按 `is_focused_pane` 同步——否则聚焦本
+    /// 只读 diff pane 时左上角不会出现活跃三角。
+    fn refresh_active_pane_indicator(&mut self, ctx: &mut ViewContext<Self>) {
+        let is_focused_pane = self
+            .focus_handle
+            .as_ref()
+            .is_some_and(|h| h.split_pane_state(ctx).is_focused_pane());
+        self.pane_configuration.update(ctx, move |cfg, ctx| {
+            cfg.set_show_active_pane_indicator(is_focused_pane, ctx);
+        });
+    }
 }
 
 impl Entity for CommitDiffView {
@@ -241,7 +255,19 @@ impl BackingView for CommitDiffView {
         })
     }
 
-    fn set_focus_handle(&mut self, focus_handle: PaneFocusHandle, _ctx: &mut ViewContext<Self>) {
+    fn set_focus_handle(&mut self, focus_handle: PaneFocusHandle, ctx: &mut ViewContext<Self>) {
+        // 订阅 pane group 焦点变化：本 pane 成为 / 不再是分屏中的焦点 pane 时，同步左上角
+        // 活跃三角标记。
+        ctx.subscribe_to_model(focus_handle.focus_state_handle(), |me, _, event, ctx| {
+            let affected = me
+                .focus_handle
+                .as_ref()
+                .is_some_and(|h| h.is_affected(event));
+            if affected {
+                me.refresh_active_pane_indicator(ctx);
+            }
+        });
         self.focus_handle = Some(focus_handle);
+        self.refresh_active_pane_indicator(ctx);
     }
 }

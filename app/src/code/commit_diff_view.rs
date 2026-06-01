@@ -119,12 +119,14 @@ impl CommitDiffView {
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<InlineDiffView> {
         let editor = ctx.add_typed_action_view(|ctx| {
+            // 关掉 hover/active 时 change bar 加宽（3→8px），让所有 hunk 标记恒为 3px、宽度统一。
             CodeEditorView::new(
                 None,
                 None,
                 CodeEditorRenderOptions::new(VerticalExpansionBehavior::FillMaxHeight).lazy_layout(),
                 ctx,
             )
+            .disable_diff_indicator_expansion_on_hover()
         });
         editor.update(ctx, |editor_view, ctx| {
             editor_view.set_language_with_local_path(Path::new(repo_relative_path), ctx);

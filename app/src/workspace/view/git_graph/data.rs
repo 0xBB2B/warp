@@ -222,6 +222,17 @@ pub(crate) async fn load_commit_graph(
     Ok(parse_commit_log(&stdout))
 }
 
+/// Fetches from the configured remotes and prunes deleted remote-tracking refs
+/// (`git fetch --prune`). Used by the manual refresh button so the graph picks
+/// up new remote commits and drops branches that were deleted on the remote.
+/// Callers treat failure as fail-soft: a repo with no remote, an offline
+/// machine, or an auth failure must not block the local reload that follows.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn fetch_remotes(repo_root: &Path) -> Result<()> {
+    warp_util::git::run_git_command(repo_root, &["fetch", "--prune"]).await?;
+    Ok(())
+}
+
 /// A branch ref usable for filtering the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BranchRef {

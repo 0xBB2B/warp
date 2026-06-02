@@ -360,6 +360,34 @@ impl GitGraphView {
     /// - `false` (manual refresh / scan depth change): keep the previously
     ///   selected repo.
     /// Both cases fall back to the first repo.
+    /// Manual refresh (the toolbar refresh button): runs `git fetch --prune` on
+    /// the current repo first — so the graph picks up new remote commits and
+    /// drops branches deleted on the remote — then rediscovers + reloads. The
+    /// fetch is async (never blocks the UI) and fail-soft: a repo with no
+    /// remote, an offline machine, or an auth failure falls straight through to
+    /// a normal local reload.
+    fn refresh(&mut self, ctx: &mut ViewContext<Self>) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(repo) = self.current_repo_path() {
+            self.state = LoadState::Loading;
+            ctx.notify();
+            let expected = repo.clone();
+            ctx.spawn(
+                async move { super::data::fetch_remotes(&repo).await },
+                move |view, _result, ctx| {
+                    // Fetch result intentionally ignored (fail-soft). Only skip
+                    // the reload if the user switched repos while fetching.
+                    if view.current_repo_path().as_deref() == Some(expected.as_path()) {
+                        view.discover(false, ctx);
+                    }
+                },
+            );
+            return;
+        }
+
+        self.discover(false, ctx);
+    }
+
     fn discover(&mut self, follow_anchor: bool, ctx: &mut ViewContext<Self>) {
         // Remember the currently selected repo; once discovery completes,
         // `follow_anchor` decides whether to keep it or follow the anchor.
@@ -2027,7 +2055,7 @@ impl TypedActionView for GitGraphView {
                 if let Some(repo) = self.current_repo_path() {
                     self.saved_branch_selections.remove(&repo);
                 }
-                self.discover(false, ctx);
+                self.refresh(ctx);
             }
             GitGraphAction::CloseDetail => {
                 self.clear_selection();

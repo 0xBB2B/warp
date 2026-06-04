@@ -143,6 +143,15 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(crate::ai::blocklist::QueuedQueryModel::new);
     app.add_singleton_model(|ctx| OrchestrationPillBarModel::new(Default::default(), ctx));
     app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+    // The blocklist controller created during terminal bootstrap subscribes to
+    // OrchestrationEventService and OrchestrationEventStreamer unconditionally,
+    // so both singletons must be registered before bootstrap.
+    app.add_singleton_model(
+        crate::ai::blocklist::orchestration_events::OrchestrationEventService::new,
+    );
+    app.add_singleton_model(
+        crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer::new,
+    );
     app.add_singleton_model(|_| ActiveAgentViewsModel::new());
     app.add_singleton_model(AgentNotificationsModel::new);
     app.add_singleton_model(AgentConversationsModel::new);
@@ -1882,7 +1891,7 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (focused), the options
         // for sharing are "Stop sharing" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items = workspace.tabs[1].menu_items(1, 3, ctx);
+            let items = workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, ctx);
             assert!(items[0]
                 .is_approximately_same_item_as(&MenuItemFields::new("Stop sharing").into_item()));
             assert!(items[1].is_approximately_same_item_as(
@@ -1903,7 +1912,7 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (unfocused), the options
         // for sharing are "Share session" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items = workspace.tabs[1].menu_items(1, 3, ctx);
+            let items = workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, ctx);
             assert!(items[0]
                 .is_approximately_same_item_as(&MenuItemFields::new("Share session").into_item()));
             assert!(items[1].is_approximately_same_item_as(
@@ -1919,7 +1928,7 @@ fn test_tab_context_menu_share_session_items() {
 
         // When there's no shared sessions in a tab, the only option is "Share session".
         workspace.read(&app, |workspace, ctx| {
-            let items = workspace.tabs[1].menu_items(1, 3, ctx);
+            let items = workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, ctx);
             assert!(items[0]
                 .is_approximately_same_item_as(&MenuItemFields::new("Share session").into_item()));
             assert!(items[1].is_approximately_same_item_as(&MenuItem::Separator));

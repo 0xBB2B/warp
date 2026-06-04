@@ -61,7 +61,8 @@ use crate::ai::execution_profiles::profiles::{
     AIExecutionProfilesModel, AIExecutionProfilesModelEvent, ClientProfileId,
 };
 use crate::ai::execution_profiles::{
-    AIExecutionProfile, AIExecutionProfileAppExt, ActionPermission, WriteToPtyPermission,
+    long_context_pricing_warning_title, AIExecutionProfile, AIExecutionProfileAppExt,
+    ActionPermission, WriteToPtyPermission,
 };
 use crate::ai::llms::{LLMContextWindow, LLMId, LLMPreferences, LLMPreferencesEvent};
 use crate::ai::mcp::TemplatableMCPServerManager;
@@ -81,8 +82,8 @@ use crate::settings::{
     AwsBedrockCredentialsEnabled, CanUseWarpCreditsForFallback, CodeSettings,
     CodebaseContextEnabled, FileBasedMcpEnabled, GitOperationsAutogenEnabled,
     IncludeAgentCommandsInHistory, InputSettings, IntelligentAutosuggestionsEnabled, MemoryEnabled,
-    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, RuleSuggestionsEnabled,
-    SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
+    NLDInTerminalEnabled, NaturalLanguageAutosuggestionsEnabled, PromptSubmissionMode,
+    RuleSuggestionsEnabled, SharedBlockTitleGenerationEnabled, ShouldRenderCLIAgentToolbar,
     ShouldRenderUseAgentToolbarForUserCommands, ShouldShowOzUpdatesInZeroState, ShowAgentTips,
     ShowConversationHistory, ShowHintText, ThinkingDisplayMode, VoiceInputEnabled,
     WarpDriveContextEnabled,
@@ -90,7 +91,10 @@ use crate::settings::{
 use crate::terminal::session_settings::{SessionSettings, SessionSettingsChangedEvent};
 use crate::terminal::CLIAgent;
 use crate::view_components::action_button::{ActionButton, ButtonSize, SecondaryTheme};
-use crate::view_components::{FilterableDropdown, SubmittableTextInput, SubmittableTextInputEvent};
+use crate::view_components::{
+    render_warning_box, FilterableDropdown, SubmittableTextInput, SubmittableTextInputEvent,
+    WarningBoxConfig,
+};
 use crate::workspaces::user_workspaces::UserWorkspacesEvent;
 
 /// Identifies which subpage of the AI settings the user is viewing.
@@ -323,6 +327,28 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
                     mode.command_palette_description(),
                     builder(SettingsAction::AI(
                         AISettingsPageAction::SetThinkingDisplayMode(mode),
+                    )),
+                    ai_context.clone() & !id!(context_flag),
+                )
+                .with_group(bindings::BindingGroup::WarpAi.as_str())
+            })
+            .collect();
+        app.register_fixed_bindings(mode_bindings);
+    }
+    if FeatureFlag::QueueSlashCommand.is_enabled() {
+        use warpui::keymap::FixedBinding;
+
+        let ai_context = context.clone() & id!(flags::IS_ANY_AI_ENABLED);
+        let mode_bindings: Vec<FixedBinding> = PromptSubmissionMode::iter()
+            .map(|mode| {
+                let context_flag = match mode {
+                    PromptSubmissionMode::Interrupt => flags::PROMPT_SUBMISSION_INTERRUPT,
+                    PromptSubmissionMode::Queue => flags::PROMPT_SUBMISSION_QUEUE,
+                };
+                FixedBinding::empty(
+                    mode.command_palette_description(),
+                    builder(SettingsAction::AI(
+                        AISettingsPageAction::SetPromptSubmissionMode(mode),
                     )),
                     ai_context.clone() & !id!(context_flag),
                 )
@@ -612,8 +638,10 @@ pub struct AISettingsPageView {
     context_window_slider_state: SliderStateHandle,
     context_window_editor: ViewHandle<EditorView>,
     last_synced_context_window_editor_value: Option<u32>,
+    dragged_context_window_value: Option<u32>,
 
     thinking_display_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
+    default_prompt_submission_mode_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
     #[cfg(feature = "local_fs")]
     conversation_layout_dropdown: ViewHandle<Dropdown<AISettingsPageAction>>,
 
@@ -754,6 +782,18 @@ impl AISettingsPageView {
             thinking_display_mode_dropdown.update(ctx, |dropdown, ctx| {
                 dropdown.set_selected_by_action(
                     AISettingsPageAction::SetThinkingDisplayMode(current_mode),
+                    ctx,
+                );
+            });
+        }
+
+        let default_prompt_submission_mode_dropdown =
+            OtherAIWidget::create_default_prompt_submission_mode_dropdown(ctx);
+        {
+            let current_mode = AISettings::as_ref(ctx).default_prompt_submission_mode;
+            default_prompt_submission_mode_dropdown.update(ctx, |dropdown, ctx| {
+                dropdown.set_selected_by_action(
+                    AISettingsPageAction::SetPromptSubmissionMode(current_mode),
                     ctx,
                 );
             });
@@ -1158,6 +1198,16 @@ impl AISettingsPageView {
                         .update(ctx, |dropdown, ctx| {
                             dropdown.set_selected_by_action(
                                 AISettingsPageAction::SetThinkingDisplayMode(current_mode),
+                                ctx,
+                            );
+                        });
+                }
+                AISettingsChangedEvent::PromptSubmissionMode { .. } => {
+                    let current_mode = AISettings::as_ref(ctx).default_prompt_submission_mode;
+                    me.default_prompt_submission_mode_dropdown
+                        .update(ctx, |dropdown, ctx| {
+                            dropdown.set_selected_by_action(
+                                AISettingsPageAction::SetPromptSubmissionMode(current_mode),
                                 ctx,
                             );
                         });
@@ -1662,6 +1712,7 @@ impl AISettingsPageView {
             context_window_slider_state,
             context_window_editor,
             last_synced_context_window_editor_value,
+            dragged_context_window_value: None,
             autonomy_dropdown_menu,
             code_read_allowlist_editor,
             code_read_autonomy_dropdown_menu,
@@ -1683,6 +1734,7 @@ impl AISettingsPageView {
             mcp_denylist_dropdown,
             mcp_denylist_mouse_state_handles,
             thinking_display_mode_dropdown,
+            default_prompt_submission_mode_dropdown,
             #[cfg(feature = "local_fs")]
             conversation_layout_dropdown,
             profile_views,
@@ -2198,6 +2250,7 @@ impl AISettingsPageView {
     }
 
     fn sync_context_window_editor(&mut self, ctx: &mut ViewContext<Self>, force: bool) {
+        self.dragged_context_window_value = None;
         let Some(value) = Self::current_context_window_display_value(ctx) else {
             self.last_synced_context_window_editor_value = None;
             self.context_window_slider_state.reset_offset();
@@ -2783,6 +2836,7 @@ pub enum AISettingsPageAction {
     ToggleShowAgentTips,
     ToggleShowOzUpdatesInZeroState,
     SetThinkingDisplayMode(ThinkingDisplayMode),
+    SetPromptSubmissionMode(PromptSubmissionMode),
     AttemptLoginGatedUpgrade,
     RemoveCLIAgentToolbarEnabledCommand(String),
     RemoveFromCommandExecutionAllowlist(AgentModeCommandExecutionPredicate),
@@ -3234,6 +3288,14 @@ impl TypedActionView for AISettingsPageView {
                 });
                 ctx.notify();
             }
+            AISettingsPageAction::SetPromptSubmissionMode(mode) => {
+                AISettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings
+                        .default_prompt_submission_mode
+                        .set_value(*mode, ctx));
+                });
+                ctx.notify();
+            }
             AISettingsPageAction::AttemptLoginGatedUpgrade => {
                 AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
                     auth_manager.attempt_login_gated_feature(
@@ -3292,6 +3354,7 @@ impl TypedActionView for AISettingsPageView {
                     return;
                 }
                 if Self::configurable_context_window(ctx).is_some() {
+                    self.dragged_context_window_value = Some(*value);
                     let formatted = value.to_string();
                     self.context_window_editor.update(ctx, |editor, ctx| {
                         editor.system_reset_buffer_text(&formatted, ctx);
@@ -3300,6 +3363,7 @@ impl TypedActionView for AISettingsPageView {
                 }
             }
             AISettingsPageAction::SetContextWindowSize(value) => {
+                self.dragged_context_window_value = None;
                 if !AISettings::as_ref(ctx).is_any_ai_enabled(ctx) {
                     self.sync_context_window_editor(ctx, true);
                     return;
@@ -4741,8 +4805,7 @@ impl AgentsWidget {
 
     /// Renders the context window slider + numeric input row shown below the
     /// base model dropdown. Returns `None` if the active base model does not
-    /// advertise a configurable context window, global AI is disabled, or the
-    /// [`FeatureFlag::ConfigurableContextWindow`] flag is disabled.
+    /// advertise a configurable context window or global AI is disabled.
     fn render_context_window_setting(
         &self,
         view: &AISettingsPageView,
@@ -4750,9 +4813,6 @@ impl AgentsWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Option<Box<dyn Element>> {
-        if !FeatureFlag::ConfigurableContextWindow.is_enabled() {
-            return None;
-        }
         if !ai_settings.is_any_ai_enabled(app) {
             return None;
         }
@@ -4852,12 +4912,22 @@ impl AgentsWidget {
         let row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(min_label)
-            .with_child(slider)
+            .with_child(Shrinkable::new(1., slider).finish())
             .with_child(max_label)
             .with_child(input_box)
             .finish();
 
-        Some(Flex::column().with_child(label).with_child(row).finish())
+        let mut column = Flex::column().with_child(label).with_child(row);
+        if AISettingsPageView::active_profile_data(app)
+            .should_show_long_context_pricing_warning(view.dragged_context_window_value, app)
+        {
+            column.add_child(render_warning_box(
+                WarningBoxConfig::formatted_title(long_context_pricing_warning_title()),
+                appearance,
+            ));
+        }
+
+        Some(column.finish())
     }
 
     fn render_permissions_section(
@@ -5558,7 +5628,7 @@ impl SettingsWidget for AIInputWidget {
     type View = AISettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "oz agent ai input natural language detection autodetection prompt terminal command commands history shell executed execution"
+        "oz agent ai input natural language detection autodetection prompt terminal command commands history shell executed execution queue interrupt submission submit auto-queue response while responding default"
     }
 
     fn render(
@@ -5627,6 +5697,27 @@ impl SettingsWidget for AIInputWidget {
             &view.local_only_icon_tooltip_states,
             app,
         ));
+
+        if FeatureFlag::QueueSlashCommand.is_enabled() {
+            widget_children.push(render_dropdown_item(
+                appearance,
+                "Default prompt submission mode",
+                Some(
+                    "What happens when you submit a new prompt while the agent is still \
+                     responding. You can override this per conversation using the auto-queue \
+                     toggle.",
+                ),
+                None,
+                LocalOnlyIconState::for_setting(
+                    PromptSubmissionMode::storage_key(),
+                    PromptSubmissionMode::sync_to_cloud(),
+                    &mut view.local_only_icon_tooltip_states.borrow_mut(),
+                    app,
+                ),
+                (!is_any_ai_enabled).then(|| appearance.theme().disabled_ui_text_color()),
+                &view.default_prompt_submission_mode_dropdown,
+            ));
+        }
 
         Flex::column().with_children(widget_children).finish()
     }
@@ -6234,6 +6325,28 @@ impl OtherAIWidget {
                 DropdownItem::new(
                     mode.display_name(),
                     AISettingsPageAction::SetThinkingDisplayMode(mode),
+                )
+            })
+            .collect();
+
+        ctx.add_typed_action_view(|ctx| {
+            let mut dropdown = Dropdown::new(ctx);
+            dropdown.set_top_bar_max_width(AI_SETTINGS_DROPDOWN_WIDTH);
+            dropdown.set_menu_width(AI_SETTINGS_DROPDOWN_WIDTH, ctx);
+            dropdown.set_menu_max_height(AI_SETTINGS_DROPDOWN_MAX_HEIGHT, ctx);
+            dropdown.add_items(items, ctx);
+            dropdown
+        })
+    }
+
+    fn create_default_prompt_submission_mode_dropdown(
+        ctx: &mut ViewContext<AISettingsPageView>,
+    ) -> ViewHandle<Dropdown<AISettingsPageAction>> {
+        let items: Vec<DropdownItem<AISettingsPageAction>> = PromptSubmissionMode::iter()
+            .map(|mode| {
+                DropdownItem::new(
+                    mode.display_name(),
+                    AISettingsPageAction::SetPromptSubmissionMode(mode),
                 )
             })
             .collect();

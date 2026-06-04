@@ -578,14 +578,7 @@ fn run_task(
                 }
             }
         }
-        TaskCommand::Message(message_cmd) => {
-            if !FeatureFlag::OrchestrationV2.is_enabled() {
-                return Err(anyhow::anyhow!(
-                    "The 'message' subcommand is not available in this build"
-                ));
-            }
-            ambient::run_message(ctx, global_options, message_cmd)
-        }
+        TaskCommand::Message(message_cmd) => ambient::run_message(ctx, global_options, message_cmd),
     }
 }
 
@@ -933,6 +926,7 @@ impl AgentDriverRunner {
                         .snapshot
                         .snapshot_script_timeout
                         .map(|duration| duration.into()),
+                    skip_initial_turn: args.skip_initial_turn,
                 };
 
                 Ok((merged_config, task, driver_options))

@@ -116,7 +116,9 @@ use session_sharing_protocol::common::{
     RoleRequestResponse, ServerConversationToken as SessionSharingServerConversationToken,
     WindowSize as SessionSharingWindowSize,
 };
-use session_sharing_protocol::sharer::{RoleUpdateReason, SessionEndedReason};
+use session_sharing_protocol::sharer::{
+    RoleUpdateReason, SessionEndedReason, SessionRetentionReason,
+};
 use settings::{Setting, ToggleableSetting};
 use shared_session::cloud_conversation_continuation::CloudConversationContinuationUiState;
 use shared_session::{SharedSessionAdapter, Viewer};
@@ -269,10 +271,10 @@ use crate::ai::blocklist::{
     BlocklistAIInputEvent, BlocklistAIInputModel, ClientIdentifiers, ConversationStatusUpdate,
     InputConfig, InputType, InputTypeAutoDetectionSource, LegacyPassiveSuggestionsEvent,
     LegacyPassiveSuggestionsModel, MaaPassiveSuggestionsEvent, MaaPassiveSuggestionsModel,
-    PassiveSuggestionsModels, PendingAttachment, PendingQueryState, QueuedQueryModel,
-    RequestFileEditsFormatKind, ShellCommandExecutor, ShellCommandExecutorEvent,
-    SlashCommandRequest, StartAgentExecutor, StartAgentExecutorEvent, StartAgentRequest,
-    ATTACH_AS_AGENT_MODE_CONTEXT_TEXT, PRE_REWIND_PREFIX,
+    PassiveSuggestionsModels, PendingAttachment, PendingQueryState, QueuedQuery, QueuedQueryId,
+    QueuedQueryModel, QueuedQueryOrigin, RequestFileEditsFormatKind, ShellCommandExecutor,
+    ShellCommandExecutorEvent, SlashCommandRequest, StartAgentExecutor, StartAgentExecutorEvent,
+    StartAgentRequest, ATTACH_AS_AGENT_MODE_CONTEXT_TEXT, PRE_REWIND_PREFIX,
 };
 use crate::ai::conversation_details_panel::ConversationDetailsPanelEvent;
 use crate::ai::conversation_utils;
@@ -397,12 +399,10 @@ use crate::terminal::block_list_viewport::{
 };
 use crate::terminal::bootstrap::init_subshell_command;
 use crate::terminal::cli_agent_sessions::event::{
-    parse_event, CLIAgentEvent, CLIAgentEventPayload, CLIAgentEventType,
+    parse_event, CLIAgentEvent, CLIAgentEventPayload, CLIAgentEventSource, CLIAgentEventType,
     CLI_AGENT_NOTIFICATION_SENTINEL,
 };
-use crate::terminal::cli_agent_sessions::listener::{
-    agent_supports_rich_status, is_agent_supported, CLIAgentSessionListener,
-};
+use crate::terminal::cli_agent_sessions::listener::{is_agent_supported, CLIAgentSessionListener};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{plugin_manager_for, PluginModalKind};
 use crate::terminal::cli_agent_sessions::{
@@ -1767,6 +1767,9 @@ pub enum Event {
     StopSharingCurrentSession {
         reason: SessionEndedReason,
     },
+    ExtendSessionRetention {
+        reason: SessionRetentionReason,
+    },
     CloseRequested,
     OpenShareSessionModal {
         open_source: SharedSessionActionSource,
@@ -2639,6 +2642,7 @@ pub struct TerminalView {
     pending_user_query_view_id: Option<EntityId>,
     pending_user_query_kind: Option<PendingUserQueryKind>,
     queued_prompt_callback: Option<ConversationFinishedCallback>,
+    last_observed_conversation_status: HashMap<AIConversationId, ConversationStatus>,
 
     /// Cached view ids for usage footers keyed by the AI block view id that owns them.
     usage_footer_view_ids: HashMap<EntityId, EntityId>,
@@ -4233,6 +4237,7 @@ impl TerminalView {
             pending_user_query_view_id: None,
             pending_user_query_kind: None,
             queued_prompt_callback: None,
+            last_observed_conversation_status: Default::default(),
             usage_footer_view_ids: Default::default(),
             block_onboarding_active: false,
             onboarding_agentic_suggestions_block: None,
@@ -5189,6 +5194,58 @@ impl TerminalView {
         }
     }
 
+    /// Append a prompt to the queued-query singleton for regular Agent Mode queueing surfaces
+    /// such as the queue-next toggle and `/queue`. Returns `None` if no conversation is selected
+    /// (e.g. the agent view is closed), in which case the prompt is silently dropped.
+    pub fn enqueue_prompt(
+        &mut self,
+        prompt: String,
+        origin: QueuedQueryOrigin,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<QueuedQueryId> {
+        // Guard against queueing when no conversation is active to avoid stranding prompts.
+        let conversation_id = self
+            .ai_context_model
+            .as_ref(ctx)
+            .selected_conversation_id(ctx)?;
+        let id = QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+            model.append(conversation_id, QueuedQuery::new(prompt, origin), ctx)
+        });
+        Some(id)
+    }
+
+    pub fn enqueue_initial_cloud_mode_prompt(
+        &mut self,
+        prompt: String,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<QueuedQueryId> {
+        self.enqueue_prompt(prompt, QueuedQueryOrigin::InitialCloudMode, ctx)
+    }
+
+    /// Files a follow-up prompt that will run after the next conversation finishes on
+    /// `conversation_id`. Used by `/compact-and` (targets the active conversation) and
+    /// `/fork-and-compact` (targets the newly forked conversation, which may differ from the
+    /// currently selected one). Falls back to the legacy pending-user-query block when
+    /// `QueuedPromptsV2` is disabled.
+    pub fn enqueue_followup_prompt(
+        &mut self,
+        prompt: String,
+        origin: QueuedQueryOrigin,
+        conversation_id: AIConversationId,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if FeatureFlag::QueuedPromptsV2.is_enabled() {
+            QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
+                model.append(conversation_id, QueuedQuery::new(prompt, origin), ctx);
+            });
+        } else {
+            self.send_user_query_after_next_conversation_finished(
+                prompt, /* show_close_button */ true, /* show_send_now_button */ false,
+                ctx,
+            );
+        }
+    }
+
     /// Drains one prompt from the queued-query singleton for `conversation_id` when that
     /// conversation finishes.
     fn drain_queued_prompts(
@@ -5212,7 +5269,7 @@ impl TerminalView {
                 match action {
                     Some(AutofireAction::Submit { text }) => {
                         self.input.update(ctx, |input, ctx| {
-                            input.submit_queued_prompt(text, ctx);
+                            input.submit_queued_prompt_for_active_pane(text, ctx);
                         });
                     }
                     Some(AutofireAction::PopFromEditMode { text }) => {
@@ -5259,6 +5316,33 @@ impl TerminalView {
                 }
             }
         }
+    }
+
+    /// Drains one queued prompt when the cloud setup phase completes for a promptless handoff run
+    /// (a prompt will not be auto-sent by the worker so there's no normal event to initiate a queued prompt sending).
+    pub(crate) fn maybe_drain_queue_after_promptless_setup(&mut self, ctx: &mut ViewContext<Self>) {
+        let is_promptless_run = self
+            .ambient_agent_view_model()
+            .and_then(|model| {
+                model
+                    .as_ref(ctx)
+                    .request()
+                    .map(|request| request.prompt.is_none())
+            })
+            .unwrap_or(false);
+        if !is_promptless_run {
+            return;
+        }
+
+        let Some(conversation_id) = self
+            .ai_context_model
+            .as_ref(ctx)
+            .selected_conversation_id(ctx)
+        else {
+            return;
+        };
+
+        self.drain_queued_prompts(conversation_id, FinishReason::Complete, ctx);
     }
 
     fn handle_legacy_passive_suggestions_event(
@@ -5556,7 +5640,10 @@ impl TerminalView {
         ai_block_model: &AIBlockModelImpl<AIBlock>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if self.pending_user_query_kind != Some(PendingUserQueryKind::CloudMode) {
+        let kind_is_cloud_mode =
+            self.pending_user_query_kind == Some(PendingUserQueryKind::CloudMode);
+        let v2_is_enabled = FeatureFlag::QueuedPromptsV2.is_enabled();
+        if !kind_is_cloud_mode && !v2_is_enabled {
             return;
         }
 
@@ -5568,9 +5655,16 @@ impl TerminalView {
                 .display_user_query(initial_conversation_query.as_ref())
                 .is_some()
         });
-        if has_renderable_user_query {
+        if !has_renderable_user_query {
+            return;
+        }
+        // Pending-user-query block removal stays scoped to the legacy CloudMode kind so we
+        // don't tear down /queue or other PendingUserQueryKind blocks under V2. The V2
+        // queue-row removal is independent and is a no-op when no InitialCloudMode row exists.
+        if kind_is_cloud_mode {
             self.remove_pending_user_query_block(ctx);
         }
+        self.remove_cloud_mode_queue_row(ctx);
     }
     fn render_owner_for_ai_history_event(
         &self,
@@ -5716,6 +5810,7 @@ impl TerminalView {
                     .is_some_and(|model| model.as_ref(ctx).is_local_to_cloud_handoff())
                 {
                     self.remove_pending_user_query_block(ctx);
+                    self.remove_cloud_mode_queue_row(ctx);
                 }
 
                 let should_add_ai_block = history_model
@@ -5949,16 +6044,43 @@ impl TerminalView {
             BlocklistAIHistoryEvent::UpdatedConversationStatus {
                 conversation_id,
                 update,
+                new_status,
                 ..
             } => {
                 // When the conversation state changes or a new conversation
                 // is selected, update the title to reflect that change.
                 self.update_pane_configuration(ctx);
 
+                let previous_status = self
+                    .last_observed_conversation_status
+                    .insert(*conversation_id, new_status.clone())
+                    .or_else(|| match update {
+                        ConversationStatusUpdate::Changed { prev_status } => {
+                            Some(prev_status.clone())
+                        }
+                        ConversationStatusUpdate::Restored => None,
+                    });
+
                 // Don't send notifications or insert ambient agent session ended tombstone
                 // if we're restoring this conversation on startup.
                 if matches!(update, ConversationStatusUpdate::Restored) {
                     return;
+                }
+
+                if FeatureFlag::QueuedPromptsV2.is_enabled()
+                    && self.is_ambient_agent_session(ctx)
+                    && previous_status
+                        .is_some_and(|status| status.is_in_progress() || status.is_blocked())
+                {
+                    let finish_reason = match new_status {
+                        ConversationStatus::Success => Some(FinishReason::Complete),
+                        ConversationStatus::Error => Some(FinishReason::Error),
+                        ConversationStatus::Cancelled => Some(FinishReason::Cancelled),
+                        ConversationStatus::InProgress | ConversationStatus::Blocked { .. } => None,
+                    };
+                    if let Some(finish_reason) = finish_reason {
+                        self.handle_finished_conversation(*conversation_id, finish_reason, ctx);
+                    }
                 }
 
                 self.maybe_send_agent_mode_desktop_notification(conversation_id, ctx);
@@ -6026,6 +6148,9 @@ impl TerminalView {
                 active_conversation_id,
                 ..
             } => {
+                // The singleton's own history subscriber drops queue state for cleared
+                // conversations, so no `clear_all` call is needed here.
+                self.last_observed_conversation_status.clear();
                 if let Some(active_conversation_id) = active_conversation_id {
                     self.ai_controller.update(ctx, |controller, ctx| {
                         controller.cancel_conversation_progress(
@@ -6080,11 +6205,17 @@ impl TerminalView {
                     .block_list_mut()
                     .remove_command_blocks_for_conversation(*conversation_id);
             }
-            BlocklistAIHistoryEvent::RemoveConversation { .. }
-            | BlocklistAIHistoryEvent::DeletedConversation { .. } => {
+            BlocklistAIHistoryEvent::RemoveConversation {
+                conversation_id, ..
+            }
+            | BlocklistAIHistoryEvent::DeletedConversation {
+                conversation_id, ..
+            } => {
                 // The queue is always for the currently active conversation; agent-view exit
                 // already wipes it via `ExitedAgentView`, so no per-conversation cleanup is
                 // needed here.
+                self.last_observed_conversation_status
+                    .remove(conversation_id);
             }
             BlocklistAIHistoryEvent::CreatedSubtask { .. }
             | BlocklistAIHistoryEvent::UpdatedAutoexecuteOverride { .. }
@@ -6382,7 +6513,8 @@ impl TerminalView {
             conversation.wall_to_wall_response_time_since_last_query();
 
         let conversation_usage_info = ConversationUsageInfo {
-            credits_spent: conversation.credits_spent(),
+            credits_spent: conversation.inference_credits_spent(),
+            platform_credits_spent: conversation.platform_credits_spent(),
             credits_spent_for_last_block: conversation.credits_spent_for_last_block(),
             tool_calls: tool_usage.total_tool_calls(),
             models: conversation.token_usage().to_vec(),
@@ -7379,6 +7511,24 @@ impl TerminalView {
         self.ambient_agent_view_model.as_ref()
     }
 
+    /// Tear down the Cloud Mode Setup V2 UI in response to a
+    /// setup-phase-ended signal: clear the BlockList
+    /// executing-startup-commands flag AND finish/collapse the active
+    /// ambient setup command group. Owns both pieces of state so callers
+    /// (the shared-session viewer arm, legacy fallbacks) don't have to
+    /// orchestrate two unrelated mutations. Idempotent across both.
+    pub(crate) fn tear_down_cloud_mode_setup_phase(&mut self, ctx: &mut ViewContext<Self>) {
+        self.model
+            .lock()
+            .block_list_mut()
+            .set_is_executing_oz_environment_startup_commands(false);
+        if let Some(ambient_model) = self.ambient_agent_view_model.clone() {
+            ambient_model.update(ctx, |model, ctx| {
+                model.tear_down_active_setup_command_group(ctx);
+            });
+        }
+    }
+
     fn ambient_agent_task_id_for_details_panel_from_model(
         &self,
         model: &TerminalModel,
@@ -8087,6 +8237,9 @@ impl TerminalView {
     /// don't steal focus from the user if they've focused another part of the app
     /// (e.g. another session).
     ///
+    /// Skips the steal when the user is navigating another AI block / code diff
+    /// (e.g. arrowing diff hunks), unless the target block is blocked on user input.
+    ///
     /// Warning: this should not be called when focusing the [`TerminalView`]. It could
     /// lead to a focus cycle because [`AIBlock::try_focus`] conditionally yields focus
     /// back to the [`TerminalView`].
@@ -8095,9 +8248,23 @@ impl TerminalView {
         block: &ViewHandle<AIBlock>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if ctx.is_self_or_child_focused() {
+        if !ctx.is_self_or_child_focused() {
+            return;
+        }
+        let target_needs_attention = block.as_ref(ctx).is_blocked_on_user_confirmation(ctx);
+        if target_needs_attention || !self.is_any_ai_block_focused(ctx) {
             block.update(ctx, |block, ctx| block.try_steal_focus(ctx));
         }
+    }
+
+    /// Returns `true` if focus is inside any AI block (e.g. the user is arrowing
+    /// through a code diff's hunks).
+    fn is_any_ai_block_focused(&self, ctx: &mut ViewContext<Self>) -> bool {
+        self.rich_content_views.iter().any(|rich_content| {
+            rich_content
+                .ai_block_metadata()
+                .is_some_and(|metadata| metadata.ai_block_handle.is_self_or_child_focused(ctx))
+        })
     }
 
     #[cfg(not(windows))]
@@ -10666,11 +10833,12 @@ impl TerminalView {
     ///
     /// See [`Self::redetermine_global_focus`] to change focus without checking that the terminal is focused.
     fn redetermine_terminal_focus(&mut self, ctx: &mut ViewContext<Self>) -> bool {
-        // Only reset the focus if this terminal is currently focused, don't steal it from
-        // another part of the app
+        // Only reset focus if this terminal is focused; don't steal it from another part
+        // of the app, or from an AI block / code diff the user is navigating.
         let reset_focus = ctx.is_self_or_child_focused()
             && !self.find_bar.is_self_or_child_focused(ctx)
-            && !self.block_filter_editor.is_self_or_child_focused(ctx);
+            && !self.block_filter_editor.is_self_or_child_focused(ctx)
+            && !self.is_any_ai_block_focused(ctx);
         if reset_focus {
             self.redetermine_global_focus(ctx);
         }
@@ -11699,6 +11867,7 @@ impl TerminalView {
                                                         remote_host,
                                                         draft_text: None,
                                                         custom_command_prefix: custom_command_prefix.clone(),
+                                                        received_rich_notification: false,
                                                     },
                                                     ctx,
                                                 );
@@ -12786,6 +12955,11 @@ impl TerminalView {
         if !is_agent_supported(&notification.agent) {
             return;
         }
+
+        if notification.agent == CLIAgent::Codex && !FeatureFlag::CodexPlugin.is_enabled() {
+            return;
+        }
+
         if !self.register_cli_agent_listener_from_event(&notification, ctx) {
             return;
         }
@@ -12854,15 +13028,21 @@ impl TerminalView {
         agent: CLIAgent,
         ctx: &mut ViewContext<Self>,
     ) {
-        // No SessionStart event in this path (mid-session install/update).
-        // Assume the just-installed plugin meets the minimum version for this agent
-        // so the update chip doesn't flash before the user runs /reload-plugins.
         #[cfg(not(target_family = "wasm"))]
-        let plugin_version =
-            plugin_manager_for(agent).map(|m| m.minimum_plugin_version().to_owned());
+        let plugin_version = if matches!(agent, CLIAgent::Codex) {
+            // We use the lack of a plugin version for codex to differentiate between
+            // OSC 9 notification fallback and real plugin.
+            None
+        } else {
+            // No SessionStart event in this path (mid-session install/update).
+            // Assume the just-installed plugin meets the minimum version for this agent
+            // so the update chip doesn't flash before the user runs /reload-plugins.
+            plugin_manager_for(agent).map(|m| m.minimum_plugin_version().to_owned())
+        };
         #[cfg(target_family = "wasm")]
         let plugin_version = None;
         let notification = CLIAgentEvent {
+            source: CLIAgentEventSource::RichPlugin,
             v: 1,
             agent,
             event: CLIAgentEventType::SessionStart,
@@ -13015,11 +13195,7 @@ impl TerminalView {
         {
             let should_auto_toggle_input = CLIAgentSessionsModel::as_ref(ctx)
                 .session(self.view_id)
-                .is_some_and(|s| {
-                    s.listener.is_some()
-                        && s.should_auto_toggle_input
-                        && agent_supports_rich_status(&s.agent)
-                });
+                .is_some_and(|s| s.supports_rich_status() && s.should_auto_toggle_input);
             if should_auto_toggle_input {
                 match status {
                     CLIAgentSessionStatus::Blocked { .. } => {
@@ -19187,8 +19363,19 @@ impl TerminalView {
     }
 
     fn close_find_bar(&mut self, ctx: &mut ViewContext<Self>) {
-        self.find_model.update(ctx, |find_model, _ctx| {
+        self.find_model.update(ctx, |find_model, ctx| {
             find_model.set_is_find_bar_open(false);
+            // Notify rich-content child views (e.g. AI blocks) to repaint and
+            // drop their stale find highlights. Terminal grid highlights are
+            // gated at paint time on `is_find_bar_open()`, but AI blocks are
+            // separate child views that won't repaint on their own when the
+            // find bar closes.
+            //
+            // Uses `clear_rich_content_matches` (rich-content only) rather
+            // than the broader `clear_matches`: on the async-find path the
+            // latter drops `current_find_options`, breaking `open_find_bar`'s
+            // restore-previous-query path (it reads `active_find_options`).
+            find_model.clear_rich_content_matches(ctx);
         });
         ctx.notify();
     }

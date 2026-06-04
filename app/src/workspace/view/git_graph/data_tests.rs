@@ -333,3 +333,29 @@ fn scan_subdir_repos_does_not_descend_into_found_repo() {
 
     assert_eq!(found, vec![root.join("outer")]);
 }
+
+// `diff_is_binary` only exists on native targets (it's used by the diff loaders,
+// which are themselves native-only), so gate the tests the same way.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn diff_is_binary_detects_gits_binary_marker() {
+    // For binary files git emits a top-level `Binary files ... differ` line
+    // (no `@@` hunks) instead of a textual diff.
+    let diff = "diff --git a/logo.png b/logo.png\n\
+                index e69de29..a1b2c3d 100644\n\
+                Binary files a/logo.png and b/logo.png differ\n";
+    assert!(diff_is_binary(diff));
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn diff_is_binary_is_false_for_a_textual_diff() {
+    // A normal text diff has `@@` hunks and no top-level "Binary files" line;
+    // the words appearing inside a `+`/`-` content line must not trip detection
+    // (those lines never start with "Binary files ").
+    let diff = "diff --git a/notes.txt b/notes.txt\n\
+                @@ -1 +1 @@\n\
+                -Binary files are great\n\
+                +Binary files differ in spirit\n";
+    assert!(!diff_is_binary(diff));
+}

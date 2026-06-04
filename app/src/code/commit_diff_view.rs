@@ -15,12 +15,14 @@ use ai::diff_validation::DiffType;
 use warp_editor::content::buffer::InitialBufferState;
 use warp_editor::render::element::VerticalExpansionBehavior;
 use warp_util::standardized_path::StandardizedPath;
-use warpui::elements::ChildView;
+use warpui::elements::{Align, ChildView, Text};
 use warpui::text_layout::ClipConfig;
 use warpui::{
-    AppContext, Element, Entity, ModelHandle, TypedActionView, View, ViewContext, ViewHandle,
+    AppContext, Element, Entity, ModelHandle, SingletonEntity, TypedActionView, View, ViewContext,
+    ViewHandle,
 };
 
+use crate::appearance::Appearance;
 use crate::code::diff_viewer::{DiffViewer, DisplayMode};
 use crate::code::editor::view::{CodeEditorEvent, CodeEditorRenderOptions, CodeEditorView};
 use crate::code::inline_diff::InlineDiffView;
@@ -46,17 +48,24 @@ pub struct CommitDiffView {
     diff_view: ViewHandle<InlineDiffView>,
     /// Header / tab title: `file_name @ short_hash`.
     header_title: String,
+    /// When true the file is binary: render a single centered placeholder line
+    /// instead of the (empty) diff editor, since binary bytes are not meaningful
+    /// as text.
+    is_binary: bool,
 }
 
 impl CommitDiffView {
     /// `repo_relative_path` repo-relative path; `short_hash` short commit hash (title only);
     /// `base_content` the file's full content at the parent commit (empty string for an
-    /// added file / the root commit); `hunks` this commit's unified diff hunks for the file.
+    /// added file / the root commit); `hunks` this commit's unified diff hunks for the file;
+    /// `is_binary` whether git reports the file as binary (then `base_content`/`hunks` are
+    /// empty and a centered placeholder is shown instead of the diff).
     pub fn new(
         repo_relative_path: String,
         short_hash: String,
         base_content: String,
         hunks: Vec<DiffHunk>,
+        is_binary: bool,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let header_title = Self::compute_title(&repo_relative_path, &short_hash);
@@ -79,6 +88,7 @@ impl CommitDiffView {
             focus_handle: None,
             diff_view,
             header_title,
+            is_binary,
         }
     }
 
@@ -91,6 +101,7 @@ impl CommitDiffView {
         short_hash: String,
         base_content: String,
         hunks: Vec<DiffHunk>,
+        is_binary: bool,
         ctx: &mut ViewContext<Self>,
     ) {
         self.header_title = Self::compute_title(&repo_relative_path, &short_hash);
@@ -99,6 +110,7 @@ impl CommitDiffView {
             move |cfg, ctx| cfg.set_title(title, ctx)
         });
         self.diff_view = Self::build_diff_view(&repo_relative_path, &base_content, &hunks, ctx);
+        self.is_binary = is_binary;
         ctx.notify();
     }
 
@@ -188,6 +200,22 @@ impl CommitDiffView {
             cfg.set_show_active_pane_indicator(is_focused_pane, ctx);
         });
     }
+
+    /// Placeholder shown for binary files: a single dimmed line centered both
+    /// horizontally and vertically. `Align` fills the pane's bounds and centers
+    /// its child, so the line stays in the middle regardless of pane size.
+    fn render_binary_placeholder(app: &AppContext) -> Box<dyn Element> {
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let line = Text::new_inline(
+            "This is a binary file and won't be previewed.".to_string(),
+            appearance.ui_font_family(),
+            appearance.ui_font_size(),
+        )
+        .with_color(theme.sub_text_color(theme.background()).into())
+        .finish();
+        Align::new(line).finish()
+    }
 }
 
 impl Entity for CommitDiffView {
@@ -205,7 +233,10 @@ impl View for CommitDiffView {
         "CommitDiffView"
     }
 
-    fn render(&self, _app: &AppContext) -> Box<dyn Element> {
+    fn render(&self, app: &AppContext) -> Box<dyn Element> {
+        if self.is_binary {
+            return Self::render_binary_placeholder(app);
+        }
         ChildView::new(&self.diff_view).finish()
     }
 }

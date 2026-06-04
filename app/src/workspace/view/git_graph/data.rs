@@ -518,6 +518,22 @@ pub(crate) struct CommitFileDiff {
     /// The commit's unified diff hunks for this file (reusing the code review
     /// parser and types).
     pub hunks: Vec<crate::code_review::diff_state::DiffHunk>,
+    /// Whether git reports this as a binary file. When true, `base_content` and
+    /// `hunks` are left empty (feeding binary bytes to the text editor would
+    /// just render garbage), and the diff pane shows a centered placeholder
+    /// instead of a textual diff.
+    pub is_binary: bool,
+}
+
+/// Whether a `git diff` output describes a binary file. For binary files git
+/// emits a top-level `Binary files a/x and b/x differ` line (no `@@` hunks)
+/// instead of a textual diff; detecting it lets the caller skip the unparseable
+/// content and signal the view to show a placeholder.
+#[cfg(not(target_family = "wasm"))]
+fn diff_is_binary(diff_output: &str) -> bool {
+    diff_output
+        .lines()
+        .any(|line| line.starts_with("Binary files ") && line.ends_with(" differ"))
 }
 
 /// Load a commit's change to a single file. `path` is a repository-relative path.
@@ -566,10 +582,22 @@ pub(crate) async fn load_file_diff_at_commit(
         }
     };
 
+    // Binary file: git reports `Binary files ... differ` with no parsable
+    // hunks, and the parent revision's bytes are not meaningful as text — skip
+    // both and let the view show a placeholder.
+    if diff_is_binary(&diff_output) {
+        return Ok(CommitFileDiff {
+            base_content: String::new(),
+            hunks: Vec::new(),
+            is_binary: true,
+        });
+    }
+
     let hunks = LocalDiffStateModel::parse_diff_hunks(&diff_output)?;
     Ok(CommitFileDiff {
         base_content,
         hunks,
+        is_binary: false,
     })
 }
 
@@ -638,10 +666,20 @@ pub(crate) async fn load_uncommitted_file_diff(
         .unwrap_or_default();
     }
 
+    // Binary file: same handling as the committed case above.
+    if diff_is_binary(&diff_output) {
+        return Ok(CommitFileDiff {
+            base_content: String::new(),
+            hunks: Vec::new(),
+            is_binary: true,
+        });
+    }
+
     let hunks = LocalDiffStateModel::parse_diff_hunks(&diff_output)?;
     Ok(CommitFileDiff {
         base_content,
         hunks,
+        is_binary: false,
     })
 }
 

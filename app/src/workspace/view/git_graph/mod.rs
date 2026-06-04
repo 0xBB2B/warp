@@ -12,7 +12,12 @@
 //! - [`row_canvas`] custom drawing element for a single row of lanes (vertical
 //!   lines / dots / orthogonal polylines).
 //! - [`view`]       the Git Graph view in the left panel.
+//! - [`auto_refresh`] keeps the graph in sync with git operations made outside
+//!   the panel (terminal / IDE / external git) by subscribing to the selected
+//!   repo's `.git` changes via `repo_metadata` (`local_fs`); a graph-affecting
+//!   change triggers a position-preserving reload.
 
+pub(crate) mod auto_refresh;
 pub(crate) mod data;
 pub(crate) mod layout;
 pub(crate) mod menu;

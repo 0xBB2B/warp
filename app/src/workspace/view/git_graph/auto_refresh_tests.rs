@@ -1,0 +1,113 @@
+//! Unit tests for [`super::relocate_view`] (position restore by hash) and
+//! [`super::should_reload`] (the reload predicate).
+
+use super::*;
+use crate::workspace::view::git_graph::data::CommitNode;
+
+/// Build a commit that only carries a hash (the only field [`relocate_view`]
+/// looks at).
+fn node(hash: &str) -> CommitNode {
+    CommitNode {
+        hash: hash.to_string(),
+        short_hash: hash.chars().take(7).collect(),
+        parents: Vec::new(),
+        author_name: String::new(),
+        author_email: String::new(),
+        author_time: 0,
+        subject: String::new(),
+        refs: Vec::new(),
+    }
+}
+
+fn commits(hashes: &[&str]) -> Vec<CommitNode> {
+    hashes.iter().map(|h| node(h)).collect()
+}
+
+#[test]
+fn selection_and_anchor_shift_when_new_commits_are_prepended() {
+    // The common case: a `git commit` in the terminal prepends "n1"/"n2" at the
+    // top. The user had "c" selected and "b" at the top of the viewport; both
+    // should track to their new indices so the view doesn't jump.
+    let new = commits(&["n1", "n2", "a", "b", "c", "d"]);
+    let anchor = relocate_view(&new, Some("c"), Some("b"));
+    assert_eq!(anchor.selected, Some(4));
+    assert_eq!(anchor.scroll_to, 3);
+}
+
+#[test]
+fn missing_anchor_falls_back_to_the_selected_row() {
+    // The scroll anchor "b" was dropped (e.g. rebased away); fall back to the
+    // still-present selected row.
+    let new = commits(&["a", "c"]);
+    let anchor = relocate_view(&new, Some("c"), Some("b"));
+    assert_eq!(anchor.selected, Some(1));
+    assert_eq!(anchor.scroll_to, 1);
+}
+
+#[test]
+fn missing_selection_and_anchor_fall_back_to_the_top() {
+    let new = commits(&["a", "b"]);
+    let anchor = relocate_view(&new, Some("x"), Some("y"));
+    assert_eq!(anchor.selected, None);
+    assert_eq!(anchor.scroll_to, 0);
+}
+
+#[test]
+fn no_prior_selection_anchors_on_the_viewport_top_only() {
+    let new = commits(&["a", "b", "c"]);
+    let anchor = relocate_view(&new, None, Some("b"));
+    assert_eq!(anchor.selected, None);
+    assert_eq!(anchor.scroll_to, 1);
+}
+
+mod reload_predicate {
+    use repo_metadata::watcher::TargetFile;
+    use repo_metadata::RepositoryUpdate;
+
+    use super::super::subscription::should_reload;
+
+    #[test]
+    fn local_commit_move_triggers_reload() {
+        let update = RepositoryUpdate {
+            commit_updated: true,
+            ..Default::default()
+        };
+        assert!(should_reload(&update));
+    }
+
+    #[test]
+    fn remote_ref_update_triggers_reload() {
+        let update = RepositoryUpdate {
+            remote_ref_updated: true,
+            ..Default::default()
+        };
+        assert!(should_reload(&update));
+    }
+
+    #[test]
+    fn an_empty_update_does_not_reload() {
+        // An update with no signal at all — no commit/ref move and no file
+        // change — must not trigger a reload.
+        assert!(!should_reload(&RepositoryUpdate::default()));
+    }
+
+    #[test]
+    fn a_non_ignored_file_change_triggers_reload() {
+        // A working-tree file change refreshes the uncommitted-changes count
+        // (the "reload the whole graph on a file change" policy).
+        let mut update = RepositoryUpdate::default();
+        update
+            .modified
+            .insert(TargetFile::new("src/a.rs".into(), false));
+        assert!(should_reload(&update));
+    }
+
+    #[test]
+    fn an_ignored_only_file_change_does_not_reload() {
+        let mut update = RepositoryUpdate::default();
+        update
+            .modified
+            .insert(TargetFile::new("target/x".into(), true));
+        assert!(!should_reload(&update));
+    }
+}

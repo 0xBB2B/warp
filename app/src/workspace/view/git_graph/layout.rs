@@ -19,7 +19,7 @@
 //! `% palette length` itself to pick a color, so tests can assert deterministic
 //! values.
 
-use super::data::CommitNode;
+use super::data::{CommitNode, RefKind};
 
 /// A continuing lane that passes vertically through a row without touching that
 /// row's commit node.
@@ -205,6 +205,49 @@ pub(crate) fn assign_lanes(commits: &[CommitNode]) -> GraphLayout {
     }
 
     GraphLayout { rows, max_lanes }
+}
+
+/// Sentinel hash for the synthetic "uncommitted changes" row. Real commit hashes
+/// are never empty, so an empty hash unambiguously marks the sentinel.
+pub(crate) const UNCOMMITTED_HASH: &str = "";
+
+/// Hash of the checked-out commit (the one carrying a `RefKind::Head` label),
+/// used to anchor the uncommitted row's connection to HEAD.
+fn head_commit_hash(commits: &[CommitNode]) -> Option<&str> {
+    commits
+        .iter()
+        .find(|c| c.refs.iter().any(|r| r.kind == RefKind::Head))
+        .map(|c| c.hash.as_str())
+}
+
+/// Build the per-row layout, prepending a synthetic "uncommitted changes" row
+/// (a node on the HEAD lane that connects down to the HEAD commit) when
+/// `has_uncommitted` and a HEAD commit is present in `commits`. When added, the
+/// uncommitted row is row 0, so callers offset their commit indexing by one.
+///
+/// Falls back to a plain layout when there are no uncommitted changes, or when
+/// no HEAD commit is in view (e.g. the branch filter excludes the current
+/// branch) — there's nothing to anchor the row to.
+pub(crate) fn build_layout(commits: &[CommitNode], has_uncommitted: bool) -> GraphLayout {
+    if has_uncommitted {
+        if let Some(head) = head_commit_hash(commits) {
+            let sentinel = CommitNode {
+                hash: UNCOMMITTED_HASH.to_string(),
+                short_hash: String::new(),
+                parents: vec![head.to_string()],
+                author_name: String::new(),
+                author_email: String::new(),
+                author_time: 0,
+                subject: String::new(),
+                refs: Vec::new(),
+            };
+            let mut with_sentinel = Vec::with_capacity(commits.len() + 1);
+            with_sentinel.push(sentinel);
+            with_sentinel.extend_from_slice(commits);
+            return assign_lanes(&with_sentinel);
+        }
+    }
+    assign_lanes(commits)
 }
 
 /// Return the index of the first empty column; if all are full, return the end

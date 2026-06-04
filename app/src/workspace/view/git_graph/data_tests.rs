@@ -2,6 +2,20 @@
 
 use super::*;
 
+#[test]
+fn status_count_is_one_per_changed_file() {
+    // `git status --porcelain` prints one line per changed file (staged "A ",
+    // unstaged " M", untracked "??").
+    let porcelain = "A  src/a.rs\n M src/b.rs\n?? new.txt\n";
+    assert_eq!(parse_status_count(porcelain), 3);
+}
+
+#[test]
+fn status_count_is_zero_for_a_clean_tree() {
+    assert_eq!(parse_status_count(""), 0);
+    assert_eq!(parse_status_count("\n   \n"), 0);
+}
+
 /// Build a commit record following [`LOG_FORMAT`]'s field order (including the
 /// trailing record separator).
 fn rec(

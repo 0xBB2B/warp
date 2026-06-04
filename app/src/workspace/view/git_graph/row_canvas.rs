@@ -9,7 +9,7 @@
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::{vec2f, Vector2F};
-use warpui::elements::{CornerRadius, Element, Point, Radius};
+use warpui::elements::{Border, CornerRadius, Element, Point, Radius};
 use warpui::event::DispatchedEvent;
 use warpui::{AppContext, EventContext, LayoutContext, PaintContext, SizeConstraint};
 
@@ -85,15 +85,19 @@ pub(crate) struct GitGraphRowCanvas {
     /// The graph's maximum lane count, which determines this element's width (and
     /// thus the alignment of the whole column).
     lane_count: usize,
+    /// Draw the node as a hollow ring (the synthetic "uncommitted changes" row)
+    /// instead of a filled dot.
+    hollow: bool,
     origin: Option<Point>,
     size: Option<Vector2F>,
 }
 
 impl GitGraphRowCanvas {
-    pub(crate) fn new(row: GraphRow, lane_count: usize) -> Self {
+    pub(crate) fn new(row: GraphRow, lane_count: usize, hollow: bool) -> Self {
         Self {
             row,
             lane_count,
+            hollow,
             origin: None,
             size: None,
         }
@@ -196,15 +200,22 @@ impl Element for GitGraphRowCanvas {
             Self::draw_vertical(ctx, parent_x, mid, bot, color);
         }
 
-        // Commit dot (corner_radius = radius -> a circle).
+        // Commit dot (corner_radius = radius -> a circle). The synthetic
+        // uncommitted row draws a hollow ring (border only); its transparent
+        // center lets the row's hover/selection highlight show through, reading
+        // as "not a real commit".
         let radius = DOT_DIAMETER / 2.0;
-        ctx.scene
-            .draw_rect_with_hit_recording(RectF::new(
-                vec2f(node_x - radius, mid - radius),
-                vec2f(DOT_DIAMETER, DOT_DIAMETER),
-            ))
-            .with_background(lane_color(self.row.node_color))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(radius)));
+        let color = lane_color(self.row.node_color);
+        let dot = ctx.scene.draw_rect_with_hit_recording(RectF::new(
+            vec2f(node_x - radius, mid - radius),
+            vec2f(DOT_DIAMETER, DOT_DIAMETER),
+        ));
+        dot.with_corner_radius(CornerRadius::with_all(Radius::Pixels(radius)));
+        if self.hollow {
+            dot.with_border(Border::all(LINE_THICKNESS).with_border_fill(color));
+        } else {
+            dot.with_background(color);
+        }
     }
 
     fn size(&self) -> Option<Vector2F> {

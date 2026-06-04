@@ -46,10 +46,20 @@ use warpui::platform::SaveFilePickerConfiguration;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 
 use super::data::{BranchRef, ChangedFile, CommitDetail, CommitNode, RefKind, RefLabel};
-use super::layout::{assign_lanes, GraphLayout, GraphRow};
+use super::layout::{assign_lanes, build_layout, GraphLayout, GraphRow};
 use super::menu::{build_menu, MenuKind, PromptKind};
 use super::ops::{archive_format_from_path, GitWriteOp, ResetMode};
 use super::row_canvas::GitGraphRowCanvas;
+#[cfg(feature = "local_fs")]
+use super::auto_refresh;
+#[cfg(feature = "local_fs")]
+use repo_metadata::repositories::{DetectedRepositories, RepoDetectionSource};
+#[cfg(feature = "local_fs")]
+use repo_metadata::repository::SubscriberId;
+#[cfg(feature = "local_fs")]
+use repo_metadata::Repository;
+#[cfg(feature = "local_fs")]
+use warpui::ModelHandle;
 use crate::appearance::Appearance;
 use crate::code::editor::{add_color, remove_color};
 use crate::editor::{EditorView, Event as EditorEvent, SingleLineEditorOptions};
@@ -85,6 +95,8 @@ pub(crate) fn init(app: &mut AppContext) {
 pub(crate) enum GitGraphAction {
     /// Select the Nth commit row in the list and load its detail.
     SelectCommit(usize),
+    /// Select the synthetic "uncommitted changes" row and load its diff detail.
+    SelectUncommitted,
     /// Switch to the Nth repository in the discovered list (dispatched by the
     /// top dropdown when there are multiple repos).
     SelectRepository(usize),
@@ -199,6 +211,31 @@ enum DialogState {
     Confirm { op: GitWriteOp, message: String },
     /// The reset-mode picker for "Reset current branch to this Commit".
     ResetMode { hash: String },
+}
+
+/// How a (re)load positions the commit list afterward.
+enum LoadAnchor {
+    /// Reset to the top (newest commit) and clear the selection — used on repo
+    /// switch and branch-filter changes, where the previous position is moot.
+    Top,
+    /// Preserve the user's place across an auto-refresh: re-select / re-anchor
+    /// the list by commit hash (see [`auto_refresh::relocate_view`]).
+    #[cfg(feature = "local_fs")]
+    Preserve {
+        selected_hash: Option<String>,
+        anchor_hash: Option<String>,
+    },
+}
+
+/// The repository the Git Graph is currently subscribed to for auto-refresh.
+#[cfg(feature = "local_fs")]
+struct WatchedRepo {
+    /// Root path, to detect when the selected repo changes.
+    path: PathBuf,
+    /// Handle used to unsubscribe (`stop_watching`) when switching away.
+    repository: ModelHandle<Repository>,
+    /// Subscriber id returned by `start_watching`.
+    subscriber_id: SubscriberId,
 }
 
 /// Width of the right-click context menu.
@@ -337,6 +374,28 @@ pub(crate) struct GitGraphView {
     op_error: Option<String>,
     /// Mouse state of the op-error banner's dismiss button.
     op_error_dismiss_mouse_state: MouseStateHandle,
+
+    /// Number of uncommitted changed files in the working tree (0 = clean). When
+    /// > 0, the graph shows a synthetic "Uncommitted Changes (N)" row at the top.
+    uncommitted_count: usize,
+    /// Whether the uncommitted row is the currently selected detail target
+    /// (mutually exclusive with `selected`, which holds a commit index).
+    uncommitted_selected: bool,
+
+    // --- Auto-refresh (watch the selected repo's `.git`) ---
+    /// Most recent visible row range reported by the commit list; used as the
+    /// scroll anchor when an auto-refresh re-reads the graph, so the view keeps
+    /// the user's place instead of snapping to the top.
+    #[cfg(feature = "local_fs")]
+    last_visible_range: Range<usize>,
+    /// The repo whose `.git` we're subscribed to (re-subscribed when the
+    /// selected repo changes); `None` until the first repo is watched.
+    #[cfg(feature = "local_fs")]
+    watched_repo: Option<WatchedRepo>,
+    /// Sender the repo subscriber pushes reload signals onto, drained by the
+    /// stream spawned in [`Self::new`]; cloned into each new subscriber.
+    #[cfg(feature = "local_fs")]
+    auto_refresh_tx: Sender<()>,
 }
 
 /// Empty layout, used when not loaded / on error.
@@ -385,6 +444,15 @@ impl GitGraphView {
         // triggering auto-load when scrolled to the bottom.
         let (visible_range_sender, visible_range_receiver) = async_channel::unbounded();
         let _ = ctx.spawn_stream_local(visible_range_receiver, Self::on_visible_range, |_, _| {});
+
+        // Auto-refresh: the repo subscriber pushes reload signals here; the
+        // stream drains each into a position-preserving reload.
+        #[cfg(feature = "local_fs")]
+        let auto_refresh_tx = {
+            let (tx, rx) = async_channel::unbounded::<()>();
+            let _ = ctx.spawn_stream_local(rx, Self::on_auto_refresh_signal, |_, _| {});
+            tx
+        };
 
         let repo_dropdown = ctx.add_typed_action_view(Dropdown::new);
         // Shrink to the repo name's width so that, when placed at the left of
@@ -480,6 +548,14 @@ impl GitGraphView {
             op_running: false,
             op_error: None,
             op_error_dismiss_mouse_state: MouseStateHandle::default(),
+            uncommitted_count: 0,
+            uncommitted_selected: false,
+            #[cfg(feature = "local_fs")]
+            last_visible_range: 0..0,
+            #[cfg(feature = "local_fs")]
+            watched_repo: None,
+            #[cfg(feature = "local_fs")]
+            auto_refresh_tx,
         }
     }
 
@@ -643,7 +719,7 @@ impl GitGraphView {
         self.update_repo_dropdown(ctx);
 
         if self.selected_repo.is_some() {
-            self.reload(ctx);
+            self.reload(LoadAnchor::Top, ctx);
         } else {
             self.commits = Arc::new(Vec::new());
             self.layout = Arc::new(empty_layout());
@@ -651,6 +727,9 @@ impl GitGraphView {
             self.state = LoadState::NoRepo;
             ctx.notify();
         }
+        // Re-point the auto-refresh watch at the now-selected repo (or drop it).
+        #[cfg(feature = "local_fs")]
+        self.sync_auto_refresh_subscription(ctx);
     }
 
     /// Refreshes the top repository dropdown's menu items and selection from the
@@ -717,7 +796,9 @@ impl GitGraphView {
         }
         self.selected_repo = Some(index);
         self.persist_repo_selection();
-        self.reload(ctx);
+        self.reload(LoadAnchor::Top, ctx);
+        #[cfg(feature = "local_fs")]
+        self.sync_auto_refresh_subscription(ctx);
     }
 
     /// Toggles a branch's visibility and reloads the graph. The overlay stays
@@ -730,7 +811,7 @@ impl GitGraphView {
             self.selected_branches.insert(ref_name.to_string());
         }
         self.persist_branch_selection();
-        self.load_commits(ctx);
+        self.load_commits(LoadAnchor::Top, ctx);
     }
 
     /// Selects all branches (skips if already all selected, to avoid a needless
@@ -741,7 +822,7 @@ impl GitGraphView {
         }
         self.selected_branches = self.branches.iter().map(|b| b.ref_name.clone()).collect();
         self.persist_branch_selection();
-        self.load_commits(ctx);
+        self.load_commits(LoadAnchor::Top, ctx);
     }
 
     /// Deselects all branches (skips if already none selected).
@@ -751,7 +832,7 @@ impl GitGraphView {
         }
         self.selected_branches.clear();
         self.persist_branch_selection();
-        self.load_commits(ctx);
+        self.load_commits(LoadAnchor::Top, ctx);
     }
 
     /// Persists the current branch selection back to its repo (called after the
@@ -776,6 +857,7 @@ impl GitGraphView {
     /// Clears the selection and detail (called on repo change / reload).
     fn clear_selection(&mut self) {
         self.selected = None;
+        self.uncommitted_selected = false;
         self.detail = DetailState::None;
         self.clear_detail_text_selection();
     }
@@ -789,12 +871,120 @@ impl GitGraphView {
         }
     }
 
+    /// Drains an auto-refresh signal: reloads the graph in place — keeping the
+    /// user's selection and scroll position — when there's a loaded graph to
+    /// refresh. Signals arriving before the first load are ignored.
+    #[cfg(feature = "local_fs")]
+    fn on_auto_refresh_signal(&mut self, _: (), ctx: &mut ViewContext<Self>) {
+        if !matches!(self.state, LoadState::Loaded) {
+            return;
+        }
+        // Convert the visible-row anchor (a UniformList index that includes the
+        // synthetic uncommitted row) back to a commit index.
+        let offset = usize::from(self.uncommitted_count > 0);
+        let selected_hash = self
+            .selected
+            .and_then(|i| self.commits.get(i))
+            .map(|c| c.hash.clone());
+        let anchor_hash = self
+            .commits
+            .get(self.last_visible_range.start.saturating_sub(offset))
+            .map(|c| c.hash.clone());
+        self.reload(
+            LoadAnchor::Preserve {
+                selected_hash,
+                anchor_hash,
+            },
+            ctx,
+        );
+    }
+
+    /// Re-points the auto-refresh watch at the currently selected repo: detects
+    /// it (registering it with `repo_metadata` if it wasn't already watched),
+    /// then subscribes to its `.git` changes. No-op when the watched repo hasn't
+    /// changed; tears down the previous subscription on a switch.
+    #[cfg(feature = "local_fs")]
+    fn sync_auto_refresh_subscription(&mut self, ctx: &mut ViewContext<Self>) {
+        let current = self.current_repo_path();
+        if self.watched_repo.as_ref().map(|w| w.path.as_path()) == current.as_deref() {
+            return;
+        }
+        if let Some(previous) = self.watched_repo.take() {
+            previous.repository.update(ctx, |repo, ctx| {
+                repo.stop_watching(previous.subscriber_id, ctx);
+            });
+        }
+        let Some(repo_path) = current else {
+            return;
+        };
+        let Some(repo_path_str) = repo_path.to_str().map(str::to_owned) else {
+            return;
+        };
+        // Ensure the repo is detected + watched by `repo_metadata`, then grab its
+        // handle and subscribe.
+        let detect = DetectedRepositories::handle(ctx).update(ctx, |repos, ctx| {
+            repos.detect_possible_local_git_repo(
+                &repo_path_str,
+                RepoDetectionSource::GitGraphPanel,
+                ctx,
+            )
+        });
+        ctx.spawn(detect, move |view, detected, ctx| {
+            // The selected repo may have changed (or already been subscribed by
+            // a racing sync) while detection ran.
+            if view.current_repo_path().as_deref() != Some(repo_path.as_path())
+                || view.watched_repo.is_some()
+            {
+                return;
+            }
+            let Some(detected) = detected else {
+                return;
+            };
+            let Some(repository) =
+                DetectedRepositories::as_ref(ctx).get_local_watched_repo_for_path(&detected, ctx)
+            else {
+                return;
+            };
+            let signal_tx = view.auto_refresh_tx.clone();
+            let start = repository.update(ctx, |repo, ctx| {
+                repo.start_watching(
+                    Box::new(auto_refresh::GitGraphRepositorySubscriber { signal_tx }),
+                    ctx,
+                )
+            });
+            view.watched_repo = Some(WatchedRepo {
+                path: repo_path.clone(),
+                repository: repository.clone(),
+                subscriber_id: start.subscriber_id,
+            });
+            // Tear the subscription back down if registration fails, so a later
+            // sync can retry.
+            ctx.spawn(start.registration_future, move |view, result, ctx| {
+                if result.is_err() {
+                    if let Some(w) = view.watched_repo.take() {
+                        w.repository.update(ctx, |repo, ctx| {
+                            repo.stop_watching(w.subscriber_id, ctx);
+                        });
+                    }
+                }
+            });
+        });
+    }
+
     /// Reloads the currently selected repo: first fetch the branch list (all
     /// selected by default), then load the commit graph for the selected
     /// branches. Switching repos resets the branch filter (different repos have
     /// different branches) and collapses the overlay.
-    fn reload(&mut self, ctx: &mut ViewContext<Self>) {
-        self.branch_filter_expanded = false;
+    fn reload(&mut self, anchor: LoadAnchor, ctx: &mut ViewContext<Self>) {
+        // An auto-refresh keeps the branch overlay as-is; a manual repo/branch
+        // change collapses it.
+        #[cfg(feature = "local_fs")]
+        let preserve = matches!(anchor, LoadAnchor::Preserve { .. });
+        #[cfg(not(feature = "local_fs"))]
+        let preserve = false;
+        if !preserve {
+            self.branch_filter_expanded = false;
+        }
 
         let Some(dir) = self.current_repo_path() else {
             self.branches = Arc::new(Vec::new());
@@ -844,13 +1034,13 @@ impl GitGraphView {
                             .collect(),
                     );
                     view.branches = Arc::new(branches);
-                    view.load_commits(ctx);
+                    view.load_commits(anchor, ctx);
                 },
             );
         }
         #[cfg(target_family = "wasm")]
         {
-            let _ = dir;
+            let _ = (dir, anchor);
             self.state = LoadState::NoRepo;
             ctx.notify();
         }
@@ -871,13 +1061,20 @@ impl GitGraphView {
     /// Loads the first page of the commit graph for the current repo + current
     /// branch filter (called when the branch selection changes, or after the
     /// branch list finishes loading).
-    fn load_commits(&mut self, ctx: &mut ViewContext<Self>) {
-        self.clear_selection();
+    fn load_commits(&mut self, anchor: LoadAnchor, ctx: &mut ViewContext<Self>) {
+        // `Top` resets the selection and scrolls back to the newest commit;
+        // `Preserve` (auto-refresh) keeps them and re-anchors by hash once the
+        // new page lands.
+        #[cfg(feature = "local_fs")]
+        let preserve = matches!(anchor, LoadAnchor::Preserve { .. });
+        #[cfg(not(feature = "local_fs"))]
+        let preserve = false;
+        if !preserve {
+            self.clear_selection();
+            self.list_state.scroll_to(0);
+        }
         self.has_more = false;
         self.loading_more = false;
-        // Reloading resets commits back to the first page and the scroll
-        // position back to the top (the top being the newest commit).
-        self.list_state.scroll_to(0);
 
         let Some(dir) = self.current_repo_path() else {
             self.commits = Arc::new(Vec::new());
@@ -897,31 +1094,70 @@ impl GitGraphView {
             let filter = self.branch_filter();
             ctx.spawn(
                 async move {
-                    super::data::load_commit_graph(&dir, filter.as_deref(), COMMIT_PAGE_SIZE, 0)
+                    let commits = super::data::load_commit_graph(
+                        &dir,
+                        filter.as_deref(),
+                        COMMIT_PAGE_SIZE,
+                        0,
+                    )
+                    .await?;
+                    // Bundle the cheap status query so the uncommitted row lands
+                    // together with the first page (no second flash).
+                    let uncommitted = super::data::load_working_tree_status(&dir)
                         .await
+                        .unwrap_or(0);
+                    Ok::<_, anyhow::Error>((commits, uncommitted))
                 },
                 move |view, result, ctx| {
+                    #[cfg(not(feature = "local_fs"))]
+                    let _ = &anchor;
                     if view.current_repo_path().as_deref() != Some(expected.as_path()) {
                         // Repo has switched; discard the stale result.
                         return;
                     }
                     match result {
-                        Ok(commits) => {
+                        Ok((commits, uncommitted)) => {
                             view.has_more = commits.len() == COMMIT_PAGE_SIZE;
-                            view.layout = Arc::new(assign_lanes(&commits));
+                            view.uncommitted_count = uncommitted;
+                            view.layout = Arc::new(build_layout(&commits, uncommitted > 0));
                             view.row_mouse_states = Arc::new(
-                                (0..commits.len())
+                                (0..view.layout.rows.len())
                                     .map(|_| MouseStateHandle::default())
                                     .collect(),
                             );
                             view.commits = Arc::new(commits);
                             view.state = LoadState::Loaded;
+                            // Auto-refresh: restore the user's place in the new
+                            // list by hash (see `auto_refresh::relocate_view`).
+                            #[cfg(feature = "local_fs")]
+                            if let LoadAnchor::Preserve {
+                                selected_hash,
+                                anchor_hash,
+                            } = &anchor
+                            {
+                                let placement = auto_refresh::relocate_view(
+                                    &view.commits,
+                                    selected_hash.as_deref(),
+                                    anchor_hash.as_deref(),
+                                );
+                                view.selected = placement.selected;
+                                // Offset the scroll target past the synthetic
+                                // uncommitted row (row 0) when present.
+                                let offset = usize::from(view.uncommitted_count > 0);
+                                view.list_state.scroll_to(placement.scroll_to + offset);
+                                // The selected commit is gone (e.g. amended
+                                // away): drop its now-stale detail.
+                                if placement.selected.is_none() {
+                                    view.detail = DetailState::None;
+                                }
+                            }
                         }
                         Err(err) => {
                             view.commits = Arc::new(Vec::new());
                             view.layout = Arc::new(empty_layout());
                             view.row_mouse_states = Arc::new(Vec::new());
                             view.has_more = false;
+                            view.uncommitted_count = 0;
                             let raw = err.to_string();
                             // When the directory isn't inside any git repo,
                             // `git log` reports "not a git repository"; this
@@ -941,7 +1177,7 @@ impl GitGraphView {
         }
         #[cfg(target_family = "wasm")]
         {
-            let _ = dir;
+            let _ = (dir, anchor);
             self.state = LoadState::NoRepo;
             ctx.notify();
         }
@@ -983,9 +1219,10 @@ impl GitGraphView {
                             view.has_more = batch.len() == COMMIT_PAGE_SIZE;
                             let mut combined = (*view.commits).clone();
                             combined.extend(batch);
-                            view.layout = Arc::new(assign_lanes(&combined));
+                            view.layout =
+                                Arc::new(build_layout(&combined, view.uncommitted_count > 0));
                             view.row_mouse_states = Arc::new(
-                                (0..combined.len())
+                                (0..view.layout.rows.len())
                                     .map(|_| MouseStateHandle::default())
                                     .collect(),
                             );
@@ -1011,6 +1248,11 @@ impl GitGraphView {
     /// auto-loads the next page (infinite scroll). `load_more` itself guards
     /// against reentrancy and the "no more pages" case.
     fn on_visible_range(&mut self, range: Range<usize>, ctx: &mut ViewContext<Self>) {
+        // Remembered as the auto-refresh scroll anchor (local_fs only).
+        #[cfg(feature = "local_fs")]
+        {
+            self.last_visible_range = range.clone();
+        }
         if range.end + LOAD_MORE_PREFETCH >= self.commits.len() {
             self.load_more(ctx);
         }
@@ -1033,6 +1275,7 @@ impl GitGraphView {
         };
         let hash = commit.hash.clone();
         self.selected = Some(index);
+        self.uncommitted_selected = false;
         self.detail = DetailState::Loading;
         self.clear_detail_text_selection();
         // After switching commits the detail content is replaced wholesale, so
@@ -1081,6 +1324,54 @@ impl GitGraphView {
         }
     }
 
+    /// Selects the synthetic "uncommitted changes" row and asynchronously loads
+    /// its working-tree-vs-HEAD detail (changed file list).
+    fn select_uncommitted(&mut self, ctx: &mut ViewContext<Self>) {
+        ctx.focus_self();
+        self.selected = None;
+        self.uncommitted_selected = true;
+        self.detail = DetailState::Loading;
+        self.clear_detail_text_selection();
+        self.detail_scroll_state.scroll_to(Pixels::zero());
+        ctx.notify();
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let Some(dir) = self.current_repo_path() else {
+                return;
+            };
+            ctx.spawn(
+                async move { super::data::load_uncommitted_detail(&dir).await },
+                move |view, result, ctx| {
+                    if !view.uncommitted_selected {
+                        // Selection has changed; discard the stale result.
+                        return;
+                    }
+                    view.detail = match result {
+                        Ok(detail) => {
+                            view.detail_file_mouse_states = Arc::new(
+                                (0..detail.files.len())
+                                    .map(|_| MouseStateHandle::default())
+                                    .collect(),
+                            );
+                            DetailState::Loaded(detail)
+                        }
+                        Err(err) => {
+                            view.detail_file_mouse_states = Arc::new(Vec::new());
+                            DetailState::Error(err.to_string())
+                        }
+                    };
+                    ctx.notify();
+                },
+            );
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            self.detail = DetailState::None;
+            ctx.notify();
+        }
+    }
+
     /// Handles clicking the `file_index`th changed file in the detail area:
     /// asynchronously loads that commit's changes to the file, and on
     /// completion emits [`GitGraphEvent::OpenCommitFileDiff`], which the upper
@@ -1093,15 +1384,39 @@ impl GitGraphView {
         let Some(file) = detail.files.get(file_index) else {
             return;
         };
-        let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
+        let Some(dir) = self.current_repo_path() else {
             return;
         };
-        let Some(dir) = self.current_repo_path() else {
+        let path = file.path.clone();
+
+        // The uncommitted row diffs the working tree against HEAD; a commit row
+        // diffs the commit against its parent.
+        if self.uncommitted_selected {
+            let load_path = path.clone();
+            ctx.spawn(
+                async move { super::data::load_uncommitted_file_diff(&dir, &load_path).await },
+                move |_view, result, ctx| match result {
+                    Ok(diff) => {
+                        ctx.emit(GitGraphEvent::OpenCommitFileDiff {
+                            repo_relative_path: path,
+                            short_hash: "working tree".to_string(),
+                            base_content: diff.base_content,
+                            hunks: diff.hunks,
+                        });
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to load uncommitted file diff: {err}");
+                    }
+                },
+            );
+            return;
+        }
+
+        let Some(commit) = self.selected.and_then(|i| self.commits.get(i)) else {
             return;
         };
         let hash = commit.hash.clone();
         let short_hash = commit.short_hash.clone();
-        let path = file.path.clone();
         let load_path = path.clone();
 
         ctx.spawn(
@@ -1138,8 +1453,13 @@ impl GitGraphView {
         let has_more = self.has_more;
         let shimmer = self.loading_shimmer.clone();
         let selected = self.selected;
-        let commit_count = commits.len();
-        let total = commit_count + usize::from(has_more);
+        let uncommitted_count = self.uncommitted_count;
+        let uncommitted_selected = self.uncommitted_selected;
+        // The synthetic uncommitted row, when present, is layout row 0; commit
+        // rows shift down by `offset`.
+        let offset = usize::from(uncommitted_count > 0);
+        let row_count = layout.rows.len();
+        let total = row_count + usize::from(has_more);
         let position_id = self.position_id.clone();
 
         let list = UniformList::new(self.list_state.clone(), total, move |range, app| {
@@ -1147,22 +1467,22 @@ impl GitGraphView {
             let lane_count = layout.max_lanes;
             let rows: Vec<Box<dyn Element>> = range
                 .filter_map(|i| {
-                    if i < commit_count {
-                        let commit = commits.get(i)?;
-                        let row = layout.rows.get(i)?;
+                    if i >= row_count {
+                        // Last row: load-more indicator (pulse animation;
+                        // scrolling here auto-triggers loading).
+                        return Some(render_loading_more_row(appearance, shimmer.clone()));
+                    }
+                    let row = layout.rows.get(i)?;
+                    let state = mouse_states.get(i).cloned().unwrap_or_default();
+                    // Synthetic "uncommitted changes" row (hollow node); not
+                    // selectable yet, but highlights on hover.
+                    if offset == 1 && i == 0 {
                         let element =
-                            render_graph_row(row, lane_count, commit, i, &position_id, appearance);
-                        let state = mouse_states.get(i).cloned().unwrap_or_default();
-                        let is_selected = selected == Some(i);
-                        let row_position_id = position_id.clone();
-                        Some(
-                            // Wrap a highlight background on hover/selection
-                            // (reusing the left panel list's common
-                            // [`ItemHighlightState`]: faint on hover, slightly
-                            // deeper when selected, switching instantly as the
-                            // mouse enters/leaves).
+                            render_uncommitted_row(row, lane_count, uncommitted_count, appearance);
+                        return Some(
                             Hoverable::new(state, move |mouse_state| {
-                                let highlight = ItemHighlightState::new(is_selected, mouse_state);
+                                let highlight =
+                                    ItemHighlightState::new(uncommitted_selected, mouse_state);
                                 let mut container = Container::new(element);
                                 if let Some(bg) = highlight.background_color(appearance) {
                                     container = container.with_background_color(bg.into_solid());
@@ -1173,29 +1493,56 @@ impl GitGraphView {
                                 container.finish()
                             })
                             .on_click(move |ctx, _, _| {
-                                ctx.dispatch_typed_action(GitGraphAction::SelectCommit(i));
-                            })
-                            // Right-click the row (off any ref badge) opens the
-                            // commit context menu.
-                            .on_right_click(move |ctx, _, position| {
-                                let Some(bounds) = ctx.element_position_by_id(&row_position_id)
-                                else {
-                                    return;
-                                };
-                                let offset = position - bounds.origin();
-                                ctx.dispatch_typed_action(GitGraphAction::OpenMenu {
-                                    kind: MenuKind::Commit { index: i },
-                                    x: offset.x(),
-                                    y: offset.y(),
-                                });
+                                ctx.dispatch_typed_action(GitGraphAction::SelectUncommitted);
                             })
                             .finish(),
-                        )
-                    } else {
-                        // Last row: load-more indicator (pulse animation;
-                        // scrolling here auto-triggers loading).
-                        Some(render_loading_more_row(appearance, shimmer.clone()))
+                        );
                     }
+                    let commit_idx = i - offset;
+                    let commit = commits.get(commit_idx)?;
+                    let element = render_graph_row(
+                        row,
+                        lane_count,
+                        commit,
+                        commit_idx,
+                        &position_id,
+                        appearance,
+                    );
+                    let is_selected = selected == Some(commit_idx);
+                    let row_position_id = position_id.clone();
+                    Some(
+                        // Wrap a highlight background on hover/selection (reusing
+                        // the left panel list's common [`ItemHighlightState`]:
+                        // faint on hover, deeper when selected).
+                        Hoverable::new(state, move |mouse_state| {
+                            let highlight = ItemHighlightState::new(is_selected, mouse_state);
+                            let mut container = Container::new(element);
+                            if let Some(bg) = highlight.background_color(appearance) {
+                                container = container.with_background_color(bg.into_solid());
+                            }
+                            if let Some(radius) = highlight.corner_radius() {
+                                container = container.with_corner_radius(radius);
+                            }
+                            container.finish()
+                        })
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(GitGraphAction::SelectCommit(commit_idx));
+                        })
+                        // Right-click the row (off any ref badge) opens the
+                        // commit context menu.
+                        .on_right_click(move |ctx, _, position| {
+                            let Some(bounds) = ctx.element_position_by_id(&row_position_id) else {
+                                return;
+                            };
+                            let menu_offset = position - bounds.origin();
+                            ctx.dispatch_typed_action(GitGraphAction::OpenMenu {
+                                kind: MenuKind::Commit { index: commit_idx },
+                                x: menu_offset.x(),
+                                y: menu_offset.y(),
+                            });
+                        })
+                        .finish(),
+                    )
                 })
                 .collect();
             rows.into_iter()
@@ -1301,7 +1648,15 @@ impl GitGraphView {
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(text_line("Commit details".to_string(), appearance, true))
+                .with_child(text_line(
+                    if self.uncommitted_selected {
+                        "Uncommitted changes".to_string()
+                    } else {
+                        "Commit details".to_string()
+                    },
+                    appearance,
+                    true,
+                ))
                 .with_child(close)
                 .finish(),
         )
@@ -1790,7 +2145,7 @@ impl GitGraphView {
                         // Everything else — including push, which updates (or
                         // creates) the local remote-tracking ref — reloads so the
                         // graph reflects the new ref positions.
-                        Ok(_) => view.reload(ctx),
+                        Ok(_) => view.reload(LoadAnchor::Top, ctx),
                         Err(err) => {
                             view.op_error = Some(clean_git_error(&err.to_string()));
                             ctx.notify();
@@ -2259,6 +2614,41 @@ fn render_centered_placeholder(
 /// Renders a single graph row: the lane drawing on the left + the commit text on
 /// the right. `index` and `position_id` let the ref badges open their context
 /// menu.
+/// Renders the synthetic "uncommitted changes" row: a hollow graph node plus an
+/// "Uncommitted Changes (N)" label.
+fn render_uncommitted_row(
+    row: &GraphRow,
+    lane_count: usize,
+    count: usize,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let theme = appearance.theme();
+    let label = format!("Uncommitted Changes ({count})");
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(GitGraphRowCanvas::new(row.clone(), lane_count, true).finish())
+        .with_child(
+            Expanded::new(
+                1.0,
+                Container::new(
+                    Text::new_inline(
+                        label,
+                        appearance.ui_font_family(),
+                        appearance.ui_font_size(),
+                    )
+                    .with_color(theme.foreground().into())
+                    .with_clip(ClipConfig::ellipsis())
+                    .finish(),
+                )
+                .with_padding_left(6.)
+                .finish(),
+            )
+            .finish(),
+        )
+        .finish()
+}
+
 fn render_graph_row(
     row: &GraphRow,
     lane_count: usize,
@@ -2270,7 +2660,7 @@ fn render_graph_row(
     Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(GitGraphRowCanvas::new(row.clone(), lane_count).finish())
+        .with_child(GitGraphRowCanvas::new(row.clone(), lane_count, false).finish())
         .with_child(Expanded::new(1.0, render_commit_text(commit, index, position_id, appearance)).finish())
         .finish()
 }
@@ -2842,6 +3232,7 @@ impl TypedActionView for GitGraphView {
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         match action {
             GitGraphAction::SelectCommit(index) => self.select_commit(*index, ctx),
+            GitGraphAction::SelectUncommitted => self.select_uncommitted(ctx),
             GitGraphAction::SelectRepository(index) => self.select_repository(*index, ctx),
             GitGraphAction::ToggleBranchFilter => {
                 self.branch_filter_expanded = !self.branch_filter_expanded;
@@ -2955,7 +3346,7 @@ impl View for GitGraphView {
             LoadState::Loaded if self.commits.is_empty() => column.with_child(
                 render_centered_placeholder(None, "No commits yet".to_string(), None, appearance),
             ),
-            LoadState::Loaded if self.selected.is_some() => column
+            LoadState::Loaded if self.selected.is_some() || self.uncommitted_selected => column
                 // The list uses Expanded to fill the remaining space above
                 // (pushing the detail area to the bottom); the detail area's
                 // height is draggable (top drag bar). Expanded rather than

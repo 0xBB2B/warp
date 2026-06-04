@@ -411,6 +411,21 @@ fn scan_subdir_repos(anchor: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
+/// Count changed files from `git status --porcelain` output: it prints one line
+/// per changed file (staged, unstaged, or untracked), so the number of
+/// uncommitted changes is the count of non-empty lines.
+pub(crate) fn parse_status_count(stdout: &str) -> usize {
+    stdout.lines().filter(|line| !line.trim().is_empty()).count()
+}
+
+/// Number of uncommitted changed files in the working tree (staged + unstaged +
+/// untracked). `0` means a clean tree.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn load_working_tree_status(repo_root: &Path) -> Result<usize> {
+    let stdout = warp_util::git::run_git_command(repo_root, &["status", "--porcelain"]).await?;
+    Ok(parse_status_count(&stdout))
+}
+
 /// A single changed file in a commit, with its insertion/deletion counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChangedFile {
@@ -550,6 +565,78 @@ pub(crate) async fn load_file_diff_at_commit(
             .await?
         }
     };
+
+    let hunks = LocalDiffStateModel::parse_diff_hunks(&diff_output)?;
+    Ok(CommitFileDiff {
+        base_content,
+        hunks,
+    })
+}
+
+/// Load the working tree's uncommitted changes as a detail (reusing
+/// [`CommitDetail`]): tracked changes vs HEAD (`git diff HEAD --numstat`) plus
+/// untracked files. `committer`/`message` are left empty — the view renders a
+/// dedicated "Uncommitted Changes" header instead.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn load_uncommitted_detail(repo_root: &Path) -> Result<CommitDetail> {
+    let numstat =
+        warp_util::git::run_git_command(repo_root, &["diff", "HEAD", "--numstat", "--no-color"])
+            .await
+            .unwrap_or_default();
+    let mut files = parse_numstat(&numstat);
+    // Untracked files aren't part of `git diff`; list and append them as new
+    // files (no line counts).
+    let untracked =
+        warp_util::git::run_git_command(repo_root, &["ls-files", "--others", "--exclude-standard"])
+            .await
+            .unwrap_or_default();
+    for path in untracked.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        files.push(ChangedFile {
+            path: path.to_string(),
+            additions: 0,
+            deletions: 0,
+        });
+    }
+    Ok(CommitDetail {
+        committer_name: String::new(),
+        committer_time: 0,
+        // Used as the detail's subject line (render_detail_body falls back to the
+        // message when there's no commit).
+        message: "Uncommitted changes".to_string(),
+        files,
+    })
+}
+
+/// Load the working tree's change to a single file (working vs HEAD), for the
+/// uncommitted row's "click a file → diff pane". Mirrors
+/// [`load_file_diff_at_commit`] but against the working tree.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn load_uncommitted_file_diff(
+    repo_root: &Path,
+    path: &str,
+) -> Result<CommitFileDiff> {
+    use crate::code_review::diff_state::LocalDiffStateModel;
+
+    // base: file content at HEAD; empty for an untracked / newly added file.
+    let base_spec = format!("HEAD:{path}");
+    let base_content = warp_util::git::run_git_command(repo_root, &["show", base_spec.as_str()])
+        .await
+        .unwrap_or_default();
+
+    // diff: working tree vs HEAD for tracked changes; an untracked file isn't in
+    // `git diff HEAD`, so fall back to showing the whole file as added.
+    let mut diff_output =
+        warp_util::git::run_git_command(repo_root, &["diff", "--no-color", "HEAD", "--", path])
+            .await
+            .unwrap_or_default();
+    if diff_output.trim().is_empty() {
+        diff_output = warp_util::git::run_git_command(
+            repo_root,
+            &["diff", "--no-color", "--no-index", "/dev/null", path],
+        )
+        .await
+        .unwrap_or_default();
+    }
 
     let hunks = LocalDiffStateModel::parse_diff_hunks(&diff_output)?;
     Ok(CommitFileDiff {

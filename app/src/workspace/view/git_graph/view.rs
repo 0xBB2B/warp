@@ -3032,13 +3032,14 @@ fn render_graph_row(
     position_id: &str,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
-    // The commit HEAD points at (the current checkout) draws a hollow ring
-    // instead of a filled dot — a "you are here" marker on the graph.
-    let is_head = commit.refs.iter().any(|r| r.kind == RefKind::Head);
+    // The HEAD "you are here" marker now sits to the left of the current
+    // branch's pill (see `render_ref_badge`), so every real commit on the
+    // graph draws a plain filled dot — only the synthetic uncommitted row is
+    // hollow.
     Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(GitGraphRowCanvas::new(row.clone(), lane_count, is_head).finish())
+        .with_child(GitGraphRowCanvas::new(row.clone(), lane_count, false).finish())
         .with_child(Expanded::new(1.0, render_commit_text(commit, index, position_id, appearance)).finish())
         .finish()
 }
@@ -3229,7 +3230,30 @@ fn render_ref_badge(
         .with_vertical_padding(1.)
         .finish();
 
-    let inner = Container::new(badge).with_padding_right(4.).finish();
+    // The current branch (HEAD) carries a hollow "you are here" ring just left
+    // of its pill — a filled box with a border and no fill draws as a ring once
+    // the corner radius rounds it to a circle. It used to mark the commit on the
+    // graph lane, but sitting beside the branch name reads more directly.
+    let pill: Box<dyn Element> = if is_current {
+        let ring = Container::new(
+            ConstrainedBox::new(Empty::new().finish())
+                .with_width(8.)
+                .with_height(8.)
+                .finish(),
+        )
+        .with_border(Border::all(2.).with_border_fill(color))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+        .finish();
+        Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Container::new(ring).with_padding_right(5.).finish())
+            .with_child(badge)
+            .finish()
+    } else {
+        badge
+    };
+
+    let inner = Container::new(pill).with_padding_right(4.).finish();
 
     match menu_target {
         Some((index, position_id)) => {

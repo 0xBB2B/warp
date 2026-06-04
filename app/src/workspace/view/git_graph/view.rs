@@ -758,11 +758,7 @@ impl GitGraphView {
         if self.selected_repo.is_some() {
             self.reload(LoadAnchor::Top, ctx);
         } else {
-            self.commits = Arc::new(Vec::new());
-            self.layout = Arc::new(empty_layout());
-            self.row_mouse_states = Arc::new(Vec::new());
-            self.state = LoadState::NoRepo;
-            ctx.notify();
+            self.enter_no_repo_state(ctx);
         }
         // Re-point the auto-refresh watch at the now-selected repo (or drop it).
         #[cfg(feature = "local_fs")]
@@ -1034,6 +1030,25 @@ impl GitGraphView {
     /// (defaulting to "Show All"), then load the commit graph. Switching repos
     /// resets the branch filter (different repos have different branches) and
     /// collapses the overlay.
+    /// Resets the panel to the "no repository" placeholder: clears the commit
+    /// graph, the branch list (so the header's branch filter disappears — it's
+    /// meaningless without a repo), and any selection. Shared by the two paths
+    /// that land on NoRepo — a discovery that finds no repo
+    /// ([`Self::set_repositories`]) and a reload with no selected repo
+    /// ([`Self::reload`]) — so they can't drift apart.
+    fn enter_no_repo_state(&mut self, ctx: &mut ViewContext<Self>) {
+        self.branches = Arc::new(Vec::new());
+        self.selected_branches.clear();
+        self.branch_mouse_states = Arc::new(Vec::new());
+        self.clear_selection();
+        self.commits = Arc::new(Vec::new());
+        self.layout = Arc::new(empty_layout());
+        self.row_mouse_states = Arc::new(Vec::new());
+        self.has_more = false;
+        self.state = LoadState::NoRepo;
+        ctx.notify();
+    }
+
     fn reload(&mut self, anchor: LoadAnchor, ctx: &mut ViewContext<Self>) {
         // An auto-refresh keeps the branch overlay as-is; a manual repo/branch
         // change collapses it and clears its search box.
@@ -1047,16 +1062,7 @@ impl GitGraphView {
         }
 
         let Some(dir) = self.current_repo_path() else {
-            self.branches = Arc::new(Vec::new());
-            self.selected_branches.clear();
-            self.branch_mouse_states = Arc::new(Vec::new());
-            self.clear_selection();
-            self.commits = Arc::new(Vec::new());
-            self.layout = Arc::new(empty_layout());
-            self.row_mouse_states = Arc::new(Vec::new());
-            self.has_more = false;
-            self.state = LoadState::NoRepo;
-            ctx.notify();
+            self.enter_no_repo_state(ctx);
             return;
         };
 
@@ -3439,12 +3445,19 @@ impl View for GitGraphView {
                 None,
                 appearance,
             )),
-            LoadState::Loading => column.with_child(render_centered_placeholder(
-                None,
-                "Loading commit history…".to_string(),
-                None,
-                appearance,
-            )),
+            // The only case that surfaces the loading placeholder: a first load
+            // with no graph on screen yet. A reload that already has commits in
+            // hand (repo / branch switch, auto-refresh) keeps the existing graph
+            // visible and swaps in place once the new page lands — see the
+            // `Loading | Loaded` arms below — so switching never flashes this.
+            LoadState::Loading if self.commits.is_empty() => {
+                column.with_child(render_centered_placeholder(
+                    None,
+                    "Loading commit history…".to_string(),
+                    None,
+                    appearance,
+                ))
+            }
             LoadState::Error(err) => column.with_child(render_centered_placeholder(
                 None,
                 "Failed to load git history".to_string(),
@@ -3454,16 +3467,24 @@ impl View for GitGraphView {
             LoadState::Loaded if self.commits.is_empty() => column.with_child(
                 render_centered_placeholder(None, "No commits yet".to_string(), None, appearance),
             ),
-            LoadState::Loaded if self.selected.is_some() || self.uncommitted_selected => column
-                // The list uses Expanded to fill the remaining space above
-                // (pushing the detail area to the bottom); the detail area's
-                // height is draggable (top drag bar). Expanded rather than
-                // Shrinkable: with few commits, Shrinkable would only shrink to
-                // the content height, leaving the list and detail crammed at the
-                // top with empty space below and the detail's drag misaligned.
-                .with_child(Expanded::new(1.0, self.render_commit_list(appearance)).finish())
-                .with_child(self.render_resizable_detail(appearance)),
-            LoadState::Loaded => {
+            // Loaded, or reloading over an existing graph: render the list (plus
+            // the open detail, if any). Selection is preserved across an
+            // auto-refresh reload and cleared on a repo / branch switch, so the
+            // detail only shows while there's still something selected.
+            LoadState::Loading | LoadState::Loaded
+                if self.selected.is_some() || self.uncommitted_selected =>
+            {
+                column
+                    // The list uses Expanded to fill the remaining space above
+                    // (pushing the detail area to the bottom); the detail area's
+                    // height is draggable (top drag bar). Expanded rather than
+                    // Shrinkable: with few commits, Shrinkable would only shrink to
+                    // the content height, leaving the list and detail crammed at the
+                    // top with empty space below and the detail's drag misaligned.
+                    .with_child(Expanded::new(1.0, self.render_commit_list(appearance)).finish())
+                    .with_child(self.render_resizable_detail(appearance))
+            }
+            LoadState::Loading | LoadState::Loaded => {
                 column.with_child(Expanded::new(1.0, self.render_commit_list(appearance)).finish())
             }
         };

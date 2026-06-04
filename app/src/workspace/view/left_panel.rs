@@ -338,9 +338,6 @@ impl LeftPanelView {
                     view.set_root_directories(local_paths.clone(), view_ctx);
                 });
 
-                // The Git Graph follows the most recent local working directory (git can read history from any subdirectory of a repository).
-                let git_graph_dir = local_paths.first().cloned();
-
                 // Directories are already in display order (most recent first) from the model
                 let local_directories = deduplicate_by_directory_name(local_paths);
                 let file_tree_view =
@@ -359,12 +356,44 @@ impl LeftPanelView {
                         view.auto_expand_to_most_recent_directory(ctx);
                     }
                 });
+                ctx.notify();
+            }
 
+            // The Git Graph tracks the *focused* pane's directory, not the most
+            // recently added one: within one tab, clicking between split panes
+            // (or CDing the focused pane) moves the graph to that pane's repo.
+            // We anchor on `focused_dir` (the pane's repo root, or its working
+            // directory when it isn't inside a repo) rather than `focused_repo`,
+            // so focusing a non-repo dir still scans it for nested repos and
+            // surfaces them — a dir with no git anywhere then shows the "not a
+            // repository" placeholder. `focused_dir` is `None` only when the
+            // focused pane has no directory at all (e.g. no terminal); that
+            // leaves the current graph in place rather than blanking it.
+            if let WorkingDirectoriesEvent::FocusedRepoChanged {
+                pane_group_id,
+                focused_dir,
+                ..
+            } = event
+            {
+                let Some(active_pane_group) = &me.active_pane_group else {
+                    return;
+                };
+                let Some(active_pane_group) = active_pane_group.upgrade(ctx) else {
+                    return;
+                };
+                if active_pane_group.id() != *pane_group_id {
+                    return;
+                }
+                let Some(git_graph_dir) = focused_dir
+                    .as_ref()
+                    .and_then(|dir| dir.to_local_path().map(|p| p.to_path_buf()))
+                else {
+                    return;
+                };
                 let git_graph_view = me.git_graph_view.clone();
                 git_graph_view.update(ctx, |view, ctx| {
-                    view.set_working_directory(git_graph_dir, ctx);
+                    view.set_working_directory(Some(git_graph_dir), ctx);
                 });
-                ctx.notify();
             }
         });
 
@@ -697,9 +726,10 @@ impl LeftPanelView {
             view.set_root_directories(local_paths.clone(), view_ctx);
         });
 
-        // The Git Graph follows the most recent local working directory; it must also be refreshed
-        // when switching the active pane group, otherwise it stays on the previous directory's state
-        // (kept consistent with the DirectoriesChanged handling).
+        // Seed the Git Graph with this pane group's most recent local working
+        // directory when switching to it, so it doesn't keep showing the
+        // previous group's state. Within the group, the `FocusedRepoChanged`
+        // handler then tracks whichever split pane is focused.
         let git_graph_dir = local_paths.first().cloned();
         let git_graph_view = self.git_graph_view.clone();
         git_graph_view.update(ctx, |view, ctx| {

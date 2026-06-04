@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_family = "wasm"))]
 use anyhow::Result;
 
+#[cfg(not(target_family = "wasm"))]
+use crate::code::commit_diff_view::DiffPreview;
+
 /// Field separator within a `git log --pretty=format` record (ASCII Unit
 /// Separator). A control character is used instead of a printable one so that
 /// ordinary characters in subject / ref names cannot corrupt parsing.
@@ -415,7 +418,10 @@ fn scan_subdir_repos(anchor: &Path, depth: usize) -> Vec<PathBuf> {
 /// per changed file (staged, unstaged, or untracked), so the number of
 /// uncommitted changes is the count of non-empty lines.
 pub(crate) fn parse_status_count(stdout: &str) -> usize {
-    stdout.lines().filter(|line| !line.trim().is_empty()).count()
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
 }
 
 /// Number of uncommitted changed files in the working tree (staged + unstaged +
@@ -518,11 +524,10 @@ pub(crate) struct CommitFileDiff {
     /// The commit's unified diff hunks for this file (reusing the code review
     /// parser and types).
     pub hunks: Vec<crate::code_review::diff_state::DiffHunk>,
-    /// Whether git reports this as a binary file. When true, `base_content` and
-    /// `hunks` are left empty (feeding binary bytes to the text editor would
-    /// just render garbage), and the diff pane shows a centered placeholder
-    /// instead of a textual diff.
-    pub is_binary: bool,
+    /// How the diff pane should present this file. For `Binary`/`Symlink`,
+    /// `base_content` and `hunks` are left empty and the view shows a centered
+    /// placeholder instead of a textual diff.
+    pub preview: DiffPreview,
 }
 
 /// Whether a `git diff` output describes a binary file. For binary files git
@@ -534,6 +539,51 @@ fn diff_is_binary(diff_output: &str) -> bool {
     diff_output
         .lines()
         .any(|line| line.starts_with("Binary files ") && line.ends_with(" differ"))
+}
+
+/// git's file mode for a symbolic link. It appears in the diff metadata as
+/// `new file mode 120000` (added), `deleted file mode 120000` (removed),
+/// `old/new mode 120000` (type change), or trailing the `index ...` line when
+/// only the target changed.
+#[cfg(not(target_family = "wasm"))]
+const GIT_SYMLINK_MODE: &str = "120000";
+
+/// Whether a `git diff` output describes a symbolic link. A symlink's blob
+/// content is just the target path, so a textual diff is a lone one-line entry
+/// that looks broken; detecting it lets the view show a placeholder naming the
+/// target instead. We match the symlink file mode `120000` only where git puts
+/// a mode (the `... mode`/`index` metadata lines), checking it is the trailing
+/// token so a blob hash that merely ends in those digits can't trip detection.
+#[cfg(not(target_family = "wasm"))]
+fn diff_is_symlink(diff_output: &str) -> bool {
+    diff_output.lines().any(|line| {
+        let is_mode_line = line.starts_with("new file mode ")
+            || line.starts_with("deleted file mode ")
+            || line.starts_with("old mode ")
+            || line.starts_with("new mode ")
+            || line.starts_with("index ");
+        is_mode_line && line.split(' ').next_back() == Some(GIT_SYMLINK_MODE)
+    })
+}
+
+/// The path a symlink points to, taken from the diff body: the added (`+`)
+/// content line for a new/retargeted link, or the removed (`-`) line for a
+/// deleted one. Empty if neither is present (shouldn't happen for a real symlink
+/// diff). Only meaningful when [`diff_is_symlink`] is true.
+#[cfg(not(target_family = "wasm"))]
+fn symlink_target(diff_output: &str) -> String {
+    // The `+++ `/`--- ` file headers and the `\ No newline` marker are excluded:
+    // the former start with `+++`/`---`, the latter starts with `\`.
+    let pick = |sign: char, header: &str| {
+        diff_output
+            .lines()
+            .filter(|l| l.starts_with(sign) && !l.starts_with(header))
+            .next_back()
+            .map(|l| l[1..].to_string())
+    };
+    pick('+', "+++")
+        .or_else(|| pick('-', "---"))
+        .unwrap_or_default()
 }
 
 /// Load a commit's change to a single file. `path` is a repository-relative path.
@@ -582,6 +632,18 @@ pub(crate) async fn load_file_diff_at_commit(
         }
     };
 
+    // Symlink: its blob is just the target path, so a textual diff is a lone
+    // one-line entry that looks broken — show a placeholder naming the target.
+    if diff_is_symlink(&diff_output) {
+        return Ok(CommitFileDiff {
+            base_content: String::new(),
+            hunks: Vec::new(),
+            preview: DiffPreview::Symlink {
+                target: symlink_target(&diff_output),
+            },
+        });
+    }
+
     // Binary file: git reports `Binary files ... differ` with no parsable
     // hunks, and the parent revision's bytes are not meaningful as text — skip
     // both and let the view show a placeholder.
@@ -589,7 +651,7 @@ pub(crate) async fn load_file_diff_at_commit(
         return Ok(CommitFileDiff {
             base_content: String::new(),
             hunks: Vec::new(),
-            is_binary: true,
+            preview: DiffPreview::Binary,
         });
     }
 
@@ -597,7 +659,7 @@ pub(crate) async fn load_file_diff_at_commit(
     Ok(CommitFileDiff {
         base_content,
         hunks,
-        is_binary: false,
+        preview: DiffPreview::Text,
     })
 }
 
@@ -666,12 +728,21 @@ pub(crate) async fn load_uncommitted_file_diff(
         .unwrap_or_default();
     }
 
-    // Binary file: same handling as the committed case above.
+    // Symlink / binary: same handling as the committed case above.
+    if diff_is_symlink(&diff_output) {
+        return Ok(CommitFileDiff {
+            base_content: String::new(),
+            hunks: Vec::new(),
+            preview: DiffPreview::Symlink {
+                target: symlink_target(&diff_output),
+            },
+        });
+    }
     if diff_is_binary(&diff_output) {
         return Ok(CommitFileDiff {
             base_content: String::new(),
             hunks: Vec::new(),
-            is_binary: true,
+            preview: DiffPreview::Binary,
         });
     }
 
@@ -679,7 +750,7 @@ pub(crate) async fn load_uncommitted_file_diff(
     Ok(CommitFileDiff {
         base_content,
         hunks,
-        is_binary: false,
+        preview: DiffPreview::Text,
     })
 }
 

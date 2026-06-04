@@ -177,9 +177,9 @@ pub(crate) enum GitGraphEvent {
         base_content: String,
         /// The commit's unified diff hunks for this file.
         hunks: Vec<crate::code_review::diff_state::DiffHunk>,
-        /// Whether git reports this as a binary file; the diff pane then shows a
-        /// placeholder instead of a textual diff.
-        is_binary: bool,
+        /// How the diff pane should present the file (text diff, or a placeholder
+        /// for a binary file / symlink).
+        preview: crate::code::commit_diff_view::DiffPreview,
     },
 }
 
@@ -1471,7 +1471,7 @@ impl GitGraphView {
                             short_hash: "working tree".to_string(),
                             base_content: diff.base_content,
                             hunks: diff.hunks,
-                            is_binary: diff.is_binary,
+                            preview: diff.preview,
                         });
                     }
                     Err(err) => {
@@ -1498,7 +1498,7 @@ impl GitGraphView {
                         short_hash,
                         base_content: diff.base_content,
                         hunks: diff.hunks,
-                        is_binary: diff.is_binary,
+                        preview: diff.preview,
                     });
                 }
                 Err(err) => {

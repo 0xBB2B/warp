@@ -40,6 +40,22 @@ pub enum CommitDiffMenuAction {
     ToggleMaximized,
 }
 
+/// How the read-only diff pane should present a file. Most files render their
+/// textual diff; binary files and symlinks have no meaningful text diff, so the
+/// pane shows a single centered placeholder line instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffPreview {
+    /// A normal textual diff — render `base_content` overlaid with `hunks`.
+    Text,
+    /// git reports a binary file (no parsable hunks); feeding its bytes to the
+    /// text editor would just render garbage.
+    Binary,
+    /// A symbolic link. Its only content is the target path it points to, so a
+    /// textual diff is a lone one-line entry that looks broken — show the target
+    /// in the placeholder instead.
+    Symlink { target: String },
+}
+
 /// Read-only view of what a single commit changed in a single file.
 pub struct CommitDiffView {
     pane_configuration: ModelHandle<PaneConfiguration>,
@@ -48,24 +64,23 @@ pub struct CommitDiffView {
     diff_view: ViewHandle<InlineDiffView>,
     /// Header / tab title: `file_name @ short_hash`.
     header_title: String,
-    /// When true the file is binary: render a single centered placeholder line
-    /// instead of the (empty) diff editor, since binary bytes are not meaningful
-    /// as text.
-    is_binary: bool,
+    /// How to present this file. For `Binary`/`Symlink` the diff editor is empty
+    /// and a single centered placeholder line is rendered instead.
+    preview: DiffPreview,
 }
 
 impl CommitDiffView {
     /// `repo_relative_path` repo-relative path; `short_hash` short commit hash (title only);
     /// `base_content` the file's full content at the parent commit (empty string for an
     /// added file / the root commit); `hunks` this commit's unified diff hunks for the file;
-    /// `is_binary` whether git reports the file as binary (then `base_content`/`hunks` are
-    /// empty and a centered placeholder is shown instead of the diff).
+    /// `preview` how to present the file (`Text` renders the diff; `Binary`/`Symlink` leave
+    /// `base_content`/`hunks` empty and show a centered placeholder instead).
     pub fn new(
         repo_relative_path: String,
         short_hash: String,
         base_content: String,
         hunks: Vec<DiffHunk>,
-        is_binary: bool,
+        preview: DiffPreview,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let header_title = Self::compute_title(&repo_relative_path, &short_hash);
@@ -88,7 +103,7 @@ impl CommitDiffView {
             focus_handle: None,
             diff_view,
             header_title,
-            is_binary,
+            preview,
         }
     }
 
@@ -101,7 +116,7 @@ impl CommitDiffView {
         short_hash: String,
         base_content: String,
         hunks: Vec<DiffHunk>,
-        is_binary: bool,
+        preview: DiffPreview,
         ctx: &mut ViewContext<Self>,
     ) {
         self.header_title = Self::compute_title(&repo_relative_path, &short_hash);
@@ -110,7 +125,7 @@ impl CommitDiffView {
             move |cfg, ctx| cfg.set_title(title, ctx)
         });
         self.diff_view = Self::build_diff_view(&repo_relative_path, &base_content, &hunks, ctx);
-        self.is_binary = is_binary;
+        self.preview = preview;
         ctx.notify();
     }
 
@@ -201,19 +216,16 @@ impl CommitDiffView {
         });
     }
 
-    /// Placeholder shown for binary files: a single dimmed line centered both
-    /// horizontally and vertically. `Align` fills the pane's bounds and centers
-    /// its child, so the line stays in the middle regardless of pane size.
-    fn render_binary_placeholder(app: &AppContext) -> Box<dyn Element> {
+    /// Placeholder shown for files that have no meaningful text diff (binary /
+    /// symlink): a single dimmed line centered both horizontally and vertically.
+    /// `Align` fills the pane's bounds and centers its child, so the line stays
+    /// in the middle regardless of pane size.
+    fn render_placeholder(text: String, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
         let theme = appearance.theme();
-        let line = Text::new_inline(
-            "This is a binary file and won't be previewed.".to_string(),
-            appearance.ui_font_family(),
-            appearance.ui_font_size(),
-        )
-        .with_color(theme.sub_text_color(theme.background()).into())
-        .finish();
+        let line = Text::new_inline(text, appearance.ui_font_family(), appearance.ui_font_size())
+            .with_color(theme.sub_text_color(theme.background()).into())
+            .finish();
         Align::new(line).finish()
     }
 }
@@ -234,10 +246,16 @@ impl View for CommitDiffView {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        if self.is_binary {
-            return Self::render_binary_placeholder(app);
+        match &self.preview {
+            DiffPreview::Text => ChildView::new(&self.diff_view).finish(),
+            DiffPreview::Binary => Self::render_placeholder(
+                "This is a binary file and won't be previewed.".to_string(),
+                app,
+            ),
+            DiffPreview::Symlink { target } => {
+                Self::render_placeholder(format!("Symbolic link → {target}"), app)
+            }
         }
-        ChildView::new(&self.diff_view).finish()
     }
 }
 

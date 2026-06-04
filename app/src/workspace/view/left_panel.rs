@@ -107,7 +107,7 @@ pub enum LeftPanelEvent {
         short_hash: String,
         base_content: String,
         hunks: Vec<crate::code_review::diff_state::DiffHunk>,
-        is_binary: bool,
+        preview: crate::code::commit_diff_view::DiffPreview,
     },
 }
 
@@ -245,14 +245,14 @@ impl LeftPanelView {
                 short_hash,
                 base_content,
                 hunks,
-                is_binary,
+                preview,
             } => {
                 ctx.emit(LeftPanelEvent::OpenCommitFileDiff {
                     repo_relative_path: repo_relative_path.clone(),
                     short_hash: short_hash.clone(),
                     base_content: base_content.clone(),
                     hunks: hunks.clone(),
-                    is_binary: *is_binary,
+                    preview: preview.clone(),
                 });
             }
         });

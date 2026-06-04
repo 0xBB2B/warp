@@ -359,3 +359,70 @@ fn diff_is_binary_is_false_for_a_textual_diff() {
                 +Binary files differ in spirit\n";
     assert!(!diff_is_binary(diff));
 }
+
+// `diff_is_symlink` / `symlink_target` are native-only for the same reason as
+// `diff_is_binary` (they back the native diff loaders).
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn diff_is_symlink_detects_the_120000_file_mode() {
+    // A newly added symlink: git records the symlink file mode 120000.
+    let added = "diff --git a/AGENTS.md b/AGENTS.md\n\
+                 new file mode 120000\n\
+                 index 0000000..681311e\n\
+                 --- /dev/null\n\
+                 +++ b/AGENTS.md\n\
+                 @@ -0,0 +1 @@\n\
+                 +CLAUDE.md\n\
+                 \\ No newline at end of file\n";
+    assert!(diff_is_symlink(added));
+
+    // A retargeted symlink: the mode trails the `index` line instead.
+    let retargeted = "diff --git a/AGENTS.md b/AGENTS.md\n\
+                      index 681311e..b6fc4c6 120000\n\
+                      --- a/AGENTS.md\n\
+                      +++ b/AGENTS.md\n\
+                      @@ -1 +1 @@\n\
+                      -CLAUDE.md\n\
+                      \\ No newline at end of file\n\
+                      +hello\n\
+                      \\ No newline at end of file\n";
+    assert!(diff_is_symlink(retargeted));
+
+    // A deleted symlink.
+    let deleted = "diff --git a/AGENTS.md b/AGENTS.md\n\
+                   deleted file mode 120000\n\
+                   index 681311e..0000000\n";
+    assert!(diff_is_symlink(deleted));
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn diff_is_symlink_is_false_for_a_regular_file() {
+    // A regular file's mode is 100644; an `index` line whose blob hash merely
+    // ends in the digits "120000" must not be mistaken for the symlink mode.
+    let diff = "diff --git a/notes.txt b/notes.txt\n\
+                index 0000000..ab120000 100644\n\
+                @@ -0,0 +1 @@\n\
+                +120000\n";
+    assert!(!diff_is_symlink(diff));
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn symlink_target_reads_the_pointed_to_path() {
+    // Added / retargeted: the new target is the added (`+`) content line.
+    let added = "new file mode 120000\n\
+                 +++ b/AGENTS.md\n\
+                 @@ -0,0 +1 @@\n\
+                 +CLAUDE.md\n\
+                 \\ No newline at end of file\n";
+    assert_eq!(symlink_target(added), "CLAUDE.md");
+
+    // Deleted: no added line, so fall back to the removed (`-`) line.
+    let deleted = "deleted file mode 120000\n\
+                   --- a/AGENTS.md\n\
+                   @@ -1 +0,0 @@\n\
+                   -CLAUDE.md\n\
+                   \\ No newline at end of file\n";
+    assert_eq!(symlink_target(deleted), "CLAUDE.md");
+}

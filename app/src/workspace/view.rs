@@ -6022,14 +6022,14 @@ impl Workspace {
                 short_hash,
                 base_content,
                 hunks,
-                is_binary,
+                preview,
             } => {
                 self.open_commit_file_diff(
                     repo_relative_path.clone(),
                     short_hash.clone(),
                     base_content.clone(),
                     hunks.clone(),
-                    *is_binary,
+                    preview.clone(),
                     ctx,
                 );
             }
@@ -6051,7 +6051,7 @@ impl Workspace {
         short_hash: String,
         base_content: String,
         hunks: Vec<crate::code_review::diff_state::DiffHunk>,
-        is_binary: bool,
+        preview: crate::code::commit_diff_view::DiffPreview,
         ctx: &mut ViewContext<Self>,
     ) {
         // Reuse: update the existing commit diff pane's content in place and focus it.
@@ -6061,7 +6061,14 @@ impl Workspace {
             .first_commit_diff_pane(ctx)
         {
             view.update(ctx, |view, ctx| {
-                view.load(repo_relative_path, short_hash, base_content, hunks, is_binary, ctx);
+                view.load(
+                    repo_relative_path,
+                    short_hash,
+                    base_content,
+                    hunks,
+                    preview,
+                    ctx,
+                );
             });
             self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
                 pane_group.focus_pane(pane_id, true, ctx);
@@ -6076,7 +6083,7 @@ impl Workspace {
                 short_hash,
                 base_content,
                 hunks,
-                is_binary,
+                preview,
                 ctx,
             )
         });

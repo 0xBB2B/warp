@@ -28,6 +28,12 @@ pub async fn run_git_command_with_env(
     let mut cmd = Command::new("git");
     cmd.arg("-c")
         .arg("diff.autoRefreshIndex=false")
+        // Emit paths as raw UTF-8 instead of git's default octal-escaped,
+        // double-quoted form (`"docs/\346\236\266..."`). Every caller parses
+        // this output programmatically, so the escaped form is never wanted —
+        // it would turn a non-ASCII path into a bogus literal.
+        .arg("-c")
+        .arg("core.quotePath=false")
         .args(args)
         .current_dir(repo_path)
         .stdout(Stdio::piped())

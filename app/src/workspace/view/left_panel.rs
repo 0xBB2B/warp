@@ -213,6 +213,7 @@ fn toolbelt_tooltip_keybinding(binding_names: &[&'static str], app: &AppContext)
 
 impl LeftPanelView {
     /// The Git Graph view handle. Exposed for integration tests.
+    #[cfg(feature = "integration_tests")]
     pub(crate) fn git_graph_view(&self) -> ViewHandle<GitGraphView> {
         self.git_graph_view.clone()
     }

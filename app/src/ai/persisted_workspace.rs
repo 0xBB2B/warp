@@ -34,6 +34,7 @@ use crate::ai::blocklist::{BlocklistAIHistoryEvent, BlocklistAIHistoryModel};
 use crate::ai::codebase_auto_indexing::{
     auto_index_candidate_roots, should_auto_index_codebase, CodebaseAutoIndexingSurface,
 };
+use crate::ai::metadata_project_rules::read_project_rule_contents;
 use crate::ai::AIRequestUsageModel;
 #[cfg(feature = "local_fs")]
 use crate::code::language_server_shutdown_manager::LanguageServerShutdownManager;
@@ -670,7 +671,11 @@ impl PersistedWorkspace {
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     fn index_repo(&self, directory_path: PathBuf, ctx: &mut ModelContext<Self>) {
         ProjectContextModel::handle(ctx).update(ctx, |model, ctx| {
-            let _ = model.index_and_store_rules(directory_path.clone(), ctx);
+            let _ = model.index_and_store_rules(
+                directory_path.clone(),
+                read_project_rule_contents,
+                ctx,
+            );
         });
         if FeatureFlag::FullSourceCodeEmbedding.is_enabled()
             && UserWorkspaces::as_ref(ctx).is_codebase_context_enabled(ctx)

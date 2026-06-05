@@ -59,6 +59,46 @@ fn index_of_hash(commits: &[CommitNode], hash: &str) -> Option<usize> {
     commits.iter().position(|c| c.hash == hash)
 }
 
+/// What the open detail pane should do after an auto-refresh reload lands.
+#[cfg(feature = "local_fs")]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DetailRefresh {
+    /// The detail's target survived the reload: leave the pane as is.
+    Keep,
+    /// The uncommitted row is selected and the working tree still has changes:
+    /// re-read the uncommitted detail in place (the very change that triggered
+    /// the reload may have altered it).
+    RefreshUncommitted,
+    /// The detail's target is gone — the selected commit vanished (e.g.
+    /// amended away), or the tree became clean while the uncommitted row was
+    /// selected: drop the now-stale detail.
+    Clear,
+}
+
+/// Decide the detail pane's fate after an auto-refresh reload. The uncommitted
+/// row is not hash-addressed, so [`relocate_view`] always reports it as
+/// `selected: None`; it must be told apart from a vanished commit selection by
+/// `uncommitted_selected` — otherwise an open uncommitted detail gets blanked
+/// by the reload its own file change triggered.
+#[cfg(feature = "local_fs")]
+pub(crate) fn detail_refresh_after_reload(
+    uncommitted_selected: bool,
+    uncommitted_count: usize,
+    relocated_selected: Option<usize>,
+) -> DetailRefresh {
+    if uncommitted_selected {
+        if uncommitted_count > 0 {
+            DetailRefresh::RefreshUncommitted
+        } else {
+            DetailRefresh::Clear
+        }
+    } else if relocated_selected.is_none() {
+        DetailRefresh::Clear
+    } else {
+        DetailRefresh::Keep
+    }
+}
+
 #[cfg(feature = "local_fs")]
 pub(crate) use subscription::GitGraphRepositorySubscriber;
 

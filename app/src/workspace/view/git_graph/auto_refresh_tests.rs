@@ -1,5 +1,6 @@
-//! Unit tests for [`super::relocate_view`] (position restore by hash) and
-//! [`super::should_reload`] (the reload predicate).
+//! Unit tests for [`super::relocate_view`] (position restore by hash),
+//! [`super::detail_refresh_after_reload`] (detail-pane fate after a reload),
+//! and [`super::should_reload`] (the reload predicate).
 
 use super::*;
 use crate::workspace::view::git_graph::data::CommitNode;
@@ -58,6 +59,50 @@ fn no_prior_selection_anchors_on_the_viewport_top_only() {
     let anchor = relocate_view(&new, None, Some("b"));
     assert_eq!(anchor.selected, None);
     assert_eq!(anchor.scroll_to, 1);
+}
+
+mod detail_refresh {
+    use super::super::{detail_refresh_after_reload, DetailRefresh};
+
+    #[test]
+    fn uncommitted_detail_refreshes_in_place_while_the_tree_is_dirty() {
+        // The uncommitted row is not hash-addressed, so relocation always
+        // reports `selected: None` for it — that must read as "re-read the
+        // uncommitted detail", not "the selection is gone, drop the detail"
+        // (the bug: a large in-flight file change delivered its watcher event
+        // after the row was clicked, and the reload blanked the loaded detail).
+        assert_eq!(
+            detail_refresh_after_reload(true, 3, None),
+            DetailRefresh::RefreshUncommitted
+        );
+    }
+
+    #[test]
+    fn uncommitted_detail_clears_when_the_tree_becomes_clean() {
+        // Everything was committed/stashed away: the uncommitted row itself is
+        // gone from the graph, so its selection and detail go with it.
+        assert_eq!(
+            detail_refresh_after_reload(true, 0, None),
+            DetailRefresh::Clear
+        );
+    }
+
+    #[test]
+    fn surviving_commit_selection_keeps_its_detail() {
+        assert_eq!(
+            detail_refresh_after_reload(false, 1, Some(4)),
+            DetailRefresh::Keep
+        );
+    }
+
+    #[test]
+    fn vanished_commit_selection_clears_its_detail() {
+        // The selected commit was amended/rebased away.
+        assert_eq!(
+            detail_refresh_after_reload(false, 1, None),
+            DetailRefresh::Clear
+        );
+    }
 }
 
 mod reload_predicate {

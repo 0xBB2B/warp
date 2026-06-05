@@ -1256,10 +1256,22 @@ impl GitGraphView {
                                 // uncommitted row (row 0) when present.
                                 let offset = usize::from(view.uncommitted_count > 0);
                                 view.list_state.scroll_to(placement.scroll_to + offset);
-                                // The selected commit is gone (e.g. amended
-                                // away): drop its now-stale detail.
-                                if placement.selected.is_none() {
-                                    view.detail = DetailState::None;
+                                match auto_refresh::detail_refresh_after_reload(
+                                    view.uncommitted_selected,
+                                    view.uncommitted_count,
+                                    placement.selected,
+                                ) {
+                                    auto_refresh::DetailRefresh::Keep => {}
+                                    auto_refresh::DetailRefresh::RefreshUncommitted => {
+                                        view.refresh_uncommitted_detail(ctx);
+                                    }
+                                    // The detail's target is gone (commit
+                                    // amended away / tree became clean): drop
+                                    // the now-stale detail.
+                                    auto_refresh::DetailRefresh::Clear => {
+                                        view.uncommitted_selected = false;
+                                        view.detail = DetailState::None;
+                                    }
                                 }
                             }
                         }
@@ -1457,36 +1469,43 @@ impl GitGraphView {
         ctx.notify();
 
         #[cfg(not(target_family = "wasm"))]
-        {
-            let Some(dir) = self.current_repo_path() else {
-                return;
-            };
-            ctx.spawn(
-                async move { super::data::load_uncommitted_detail(&dir).await },
-                move |view, result, ctx| {
-                    if !view.uncommitted_selected {
-                        // Selection has changed; discard the stale result.
-                        return;
-                    }
-                    view.detail = match result {
-                        Ok(detail) => {
-                            view.rebuild_detail_mouse_states(&detail.files);
-                            DetailState::Loaded(detail)
-                        }
-                        Err(err) => {
-                            view.clear_detail_mouse_states();
-                            DetailState::Error(err.to_string())
-                        }
-                    };
-                    ctx.notify();
-                },
-            );
-        }
+        self.refresh_uncommitted_detail(ctx);
         #[cfg(target_family = "wasm")]
         {
             self.detail = DetailState::None;
             ctx.notify();
         }
+    }
+
+    /// (Re-)loads the uncommitted detail without touching focus / scroll /
+    /// collapse state: the data half of [`Self::select_uncommitted`], also used
+    /// by the auto-refresh reload to keep an open uncommitted detail in sync
+    /// with the working tree instead of dropping it.
+    #[cfg(not(target_family = "wasm"))]
+    fn refresh_uncommitted_detail(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(dir) = self.current_repo_path() else {
+            return;
+        };
+        ctx.spawn(
+            async move { super::data::load_uncommitted_detail(&dir).await },
+            move |view, result, ctx| {
+                if !view.uncommitted_selected {
+                    // Selection has changed; discard the stale result.
+                    return;
+                }
+                view.detail = match result {
+                    Ok(detail) => {
+                        view.rebuild_detail_mouse_states(&detail.files);
+                        DetailState::Loaded(detail)
+                    }
+                    Err(err) => {
+                        view.clear_detail_mouse_states();
+                        DetailState::Error(err.to_string())
+                    }
+                };
+                ctx.notify();
+            },
+        );
     }
 
     /// Handles clicking the `file_index`th changed file in the detail area:

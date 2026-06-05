@@ -55,7 +55,7 @@ use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewCon
 #[cfg(feature = "local_fs")]
 use super::auto_refresh;
 use super::data::{BranchRef, ChangedFile, CommitDetail, CommitNode, RefKind, RefLabel};
-use super::layout::{assign_lanes, build_layout, GraphLayout, GraphRow};
+use super::layout::{build_layout, GraphLayout, GraphRow};
 use super::menu::{build_menu, MenuKind, PromptKind};
 use super::ops::{archive_format_from_path, GitWriteOp, ResetMode};
 use super::row_canvas::GitGraphRowCanvas;
@@ -328,7 +328,7 @@ pub(crate) struct GitGraphView {
     /// Loaded commits (wrapped in `Arc` for zero-copy move into the
     /// [`UniformList`] build closure).
     commits: Arc<Vec<CommitNode>>,
-    /// Per-row lane layout computed by [`assign_lanes`], one-to-one with
+    /// Per-row lane layout computed by [`build_layout`], one-to-one with
     /// `commits`.
     layout: Arc<GraphLayout>,
     state: LoadState,
@@ -671,23 +671,27 @@ impl GitGraphView {
 
     /// Whether the commit graph has finished loading. Exposed for integration
     /// tests (see `crates/integration`), since `LoadState` is private.
+    #[cfg(feature = "integration_tests")]
     pub(crate) fn is_loaded(&self) -> bool {
         matches!(self.state, LoadState::Loaded)
     }
 
     /// Number of currently loaded commits. Exposed for integration tests.
+    #[cfg(feature = "integration_tests")]
     pub(crate) fn loaded_commit_count(&self) -> usize {
         self.commits.len()
     }
 
     /// Hash of the first (newest) loaded commit, if any. Exposed for integration
     /// tests to drive a write op against a real commit.
+    #[cfg(feature = "integration_tests")]
     pub(crate) fn first_commit_hash_for_test(&self) -> Option<String> {
         self.commits.first().map(|c| c.hash.clone())
     }
 
     /// Whether a local branch named `name` is currently known (used by
     /// integration tests to assert a branch write op took effect after reload).
+    #[cfg(feature = "integration_tests")]
     pub(crate) fn has_local_branch_for_test(&self, name: &str) -> bool {
         self.branches
             .iter()
@@ -697,6 +701,7 @@ impl GitGraphView {
     /// Whether the op-error banner is showing. Exposed for the integration test
     /// that drives a failing write op and asserts the banner surfaces *and*
     /// renders without panicking.
+    #[cfg(feature = "integration_tests")]
     pub(crate) fn has_op_error_for_test(&self) -> bool {
         self.op_error.is_some()
     }
@@ -713,13 +718,22 @@ impl GitGraphView {
     /// Both cases fall back to the first repo.
     /// Manual refresh (the toolbar refresh button): runs `git fetch --prune` on
     /// the current repo first — so the graph picks up new remote commits and
-    /// drops branches deleted on the remote — then rediscovers + reloads. The
-    /// fetch is async (never blocks the UI) and fail-soft: a repo with no
-    /// remote, an offline machine, or an auth failure falls straight through to
-    /// a normal local reload.
+    /// drops branches deleted on the remote — then reloads the graph in place,
+    /// keeping the selection, scroll position, and open detail (a failed
+    /// graph falls back to a full repo re-discovery instead). The fetch is
+    /// async (never blocks the UI) and fail-soft: a repo with no remote, an
+    /// offline machine, or an auth failure falls straight through to a normal
+    /// local reload.
     fn refresh(&mut self, ctx: &mut ViewContext<Self>) {
         #[cfg(not(target_family = "wasm"))]
         if let Some(repo) = self.current_repo_path() {
+            // Captured before the state flips to Loading: only the failure
+            // states (Error / NoRepo) need the full re-discovery below. A
+            // Loading graph still holds the previous view — e.g. a second
+            // refresh click while the first fetch is in flight — so it
+            // preserves too rather than resetting.
+            #[cfg(feature = "local_fs")]
+            let had_view = !matches!(self.state, LoadState::Error(_) | LoadState::NoRepo);
             self.state = LoadState::Loading;
             // Clear any stale fetch error so a previously-failed refresh doesn't
             // keep showing the banner once a later fetch reaches the remote.
@@ -740,6 +754,16 @@ impl GitGraphView {
                     if result.is_err() {
                         view.op_error =
                             Some("Couldn't reach remote — showing local graph.".to_string());
+                    }
+                    // Reload in place — keeping the selection, scroll
+                    // position, and open detail — rather than going through
+                    // repo re-discovery, which resets the view. Only a failed
+                    // graph (Error / NoRepo) rediscovers, as the recovery
+                    // path.
+                    #[cfg(feature = "local_fs")]
+                    if had_view {
+                        view.reload_in_place(ctx);
+                        return;
                     }
                     view.discover(false, ctx);
                 },
@@ -994,7 +1018,7 @@ impl GitGraphView {
                 if !matches!(self.state, LoadState::Loaded) {
                     return;
                 }
-                self.fire_auto_refresh(ctx);
+                self.reload_in_place(ctx);
             }
             auto_refresh::ThrottleDecision::Defer(delay) => {
                 self.auto_refresh_pending = true;
@@ -1020,13 +1044,17 @@ impl GitGraphView {
         if !matches!(self.state, LoadState::Loaded) {
             return;
         }
-        self.fire_auto_refresh(ctx);
+        self.reload_in_place(ctx);
     }
 
-    /// Reloads the graph in place — keeping the user's selection and scroll
-    /// position — and stamps the throttle clock.
+    /// Reloads the graph in place — keeping the user's selection, scroll
+    /// position, and open detail (re-anchored by commit hash, see
+    /// [`auto_refresh::relocate_view`]) — and stamps the throttle clock.
+    /// Shared by auto-refresh and the manual refresh button; stamping the
+    /// clock also lets the throttle absorb the watcher signals a manual
+    /// fetch triggers itself.
     #[cfg(feature = "local_fs")]
-    fn fire_auto_refresh(&mut self, ctx: &mut ViewContext<Self>) {
+    fn reload_in_place(&mut self, ctx: &mut ViewContext<Self>) {
         self.last_auto_refresh = Some(std::time::Instant::now());
         // This refresh covers any catch-up still scheduled for the current
         // window; absorb it so the timer's callback becomes a no-op.

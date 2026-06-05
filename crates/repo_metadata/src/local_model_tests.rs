@@ -551,32 +551,23 @@ fn test_lazy_loaded_path_discovers_force_included_skills_and_emits_watcher_delta
         });
     });
 }
+
 #[cfg(feature = "local_fs")]
 #[test]
-fn test_index_directory_upgrades_lazy_loaded_path_to_repo() {
-    VirtualFS::test("lazy_loaded_path_upgrade", |dirs, mut vfs| {
-        vfs.mkdir("repo/.git/objects")
-            .mkdir("repo/src/nested")
-            .with_files(vec![
-                Stub::FileWithContent("repo/.git/HEAD", "ref: refs/heads/main"),
-                Stub::FileWithContent("repo/.git/config", "[core]\n\trepositoryformatversion = 0"),
-                Stub::FileWithContent("repo/src/nested/main.rs", "fn main() {}\n"),
-            ]);
+fn test_index_directory_path_upgrades_lazy_loaded_non_git_path() {
+    VirtualFS::test("lazy_loaded_non_git_path_upgrade", |dirs, mut vfs| {
+        vfs.mkdir("repo/src/nested")
+            .with_files(vec![Stub::FileWithContent(
+                "repo/src/nested/main.rs",
+                "fn main() {}\n",
+            )]);
 
         let repo_root = dirs.tests().join("repo");
         let src_dir = repo_root.join("src");
         let source_file = repo_root.join("src/nested/main.rs");
 
         App::test((), |mut app| async move {
-            let directory_watcher = app.add_singleton_model(DirectoryWatcher::new);
-            let repository_handle = directory_watcher.update(&mut app, |watcher, ctx| {
-                watcher
-                    .add_directory(
-                        StandardizedPath::from_local_canonicalized(&repo_root).unwrap(),
-                        ctx,
-                    )
-                    .unwrap()
-            });
+            app.add_singleton_model(DirectoryWatcher::new_for_testing);
             let model_handle = app.add_model(|_| LocalRepoMetadataModel::new_for_test());
 
             let repo_root_for_index =
@@ -588,12 +579,10 @@ fn test_index_directory_upgrades_lazy_loaded_path_to_repo() {
             });
 
             model_handle.read(&app, |model, _ctx| {
-                assert!(model.is_lazy_loaded_path(
-                    &StandardizedPath::from_local_canonicalized(&repo_root).unwrap()
-                ));
-                let Some(IndexedRepoState::Indexed(state)) = model.repository_state(
-                    &StandardizedPath::from_local_canonicalized(&repo_root).unwrap(),
-                ) else {
+                assert!(model.is_lazy_loaded_path(&repo_root_for_index));
+                let Some(IndexedRepoState::Indexed(state)) =
+                    model.repository_state(&repo_root_for_index)
+                else {
                     panic!("expected indexed lazy-loaded path");
                 };
                 assert!(state
@@ -604,7 +593,7 @@ fn test_index_directory_upgrades_lazy_loaded_path_to_repo() {
                     .contains(&StandardizedPath::try_from_local(&source_file).unwrap()));
             });
             let (tx, rx) = oneshot::channel();
-            let repo_root_for_event = repo_root.clone();
+            let repo_root_for_event = repo_root_for_index.clone();
             let upgrade_completed = Rc::new(RefCell::new(Some(tx)));
             let upgrade_completed_for_event = upgrade_completed.clone();
             app.update(|ctx| {
@@ -612,7 +601,7 @@ fn test_index_directory_upgrades_lazy_loaded_path_to_repo() {
                     if matches!(
                         event,
                         RepositoryMetadataEvent::RepositoryUpdated { path }
-                            if path.to_local_path().as_ref() == Some(&repo_root_for_event)
+                            if path == &repo_root_for_event
                     ) {
                         if let Some(tx) = upgrade_completed_for_event.borrow_mut().take() {
                             let _ = tx.send(());
@@ -622,21 +611,21 @@ fn test_index_directory_upgrades_lazy_loaded_path_to_repo() {
             });
 
             model_handle.update(&mut app, |model, ctx| {
-                model.index_directory(repository_handle, ctx).unwrap();
+                model
+                    .index_directory_path(&repo_root_for_index, ctx)
+                    .unwrap();
             });
             rx.with_timeout(Duration::from_secs(5))
                 .await
-                .expect("timed out waiting for repo upgrade")
-                .expect("repo upgrade completion sender dropped");
+                .expect("timed out waiting for full directory upgrade")
+                .expect("full directory upgrade completion sender dropped");
 
             model_handle.read(&app, |model, _ctx| {
-                assert!(!model.is_lazy_loaded_path(
-                    &StandardizedPath::from_local_canonicalized(&repo_root).unwrap()
-                ));
-                let Some(IndexedRepoState::Indexed(state)) = model.repository_state(
-                    &StandardizedPath::from_local_canonicalized(&repo_root).unwrap(),
-                ) else {
-                    panic!("expected indexed repo after upgrade");
+                assert!(!model.is_lazy_loaded_path(&repo_root_for_index));
+                let Some(IndexedRepoState::Indexed(state)) =
+                    model.repository_state(&repo_root_for_index)
+                else {
+                    panic!("expected fully indexed directory after upgrade");
                 };
                 assert!(state
                     .entry

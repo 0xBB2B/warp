@@ -385,9 +385,14 @@ pub(crate) struct GitGraphView {
     /// would keep a stale highlight. The author and committer cards share the
     /// third handle (only one card can be open at a time).
     detail_selection_handles: [SelectionHandle; 3],
-    /// Text currently selected in the detail area (in whichever segment), for
-    /// Cmd/Ctrl+C copy; written by the [`SelectableArea`] callbacks.
-    detail_selected_text: Arc<RwLock<Option<String>>>,
+    /// Text currently selected in the detail area, tagged with the owning
+    /// segment's index, for Cmd/Ctrl+C copy; written by the
+    /// [`SelectableArea`] callbacks. The tag lets a segment's "no selection"
+    /// callback clear only its own text: every [`SelectableArea`] that sees a
+    /// mouse-up reports its (possibly absent) selection, so an untagged
+    /// shared value would be wiped by whichever segment reports after the
+    /// owner.
+    detail_selected_text: Arc<RwLock<Option<(usize, String)>>>,
     /// Hover states of the detail area's author and committer rows and their
     /// floating identity cards, as `(row, card)` pairs: hovering the row opens
     /// the card, and hovering the card keeps it open so its `name <email>`
@@ -3461,7 +3466,7 @@ fn detail_selection_area(
     segment: Box<dyn Element>,
     handles: &[SelectionHandle; 3],
     index: usize,
-    selected_text: &Arc<RwLock<Option<String>>>,
+    selected_text: &Arc<RwLock<Option<(usize, String)>>>,
 ) -> Box<dyn Element> {
     let selected_text = selected_text.clone();
     let other_handles: Vec<SelectionHandle> = handles
@@ -3473,31 +3478,51 @@ fn detail_selection_area(
     SelectableArea::new(
         handles[index].clone(),
         move |args, ctx, _| {
-            // `Some` means this segment handled the click and now owns the
-            // selection (a mouse-down it handles never reaches the other
-            // segments, which would otherwise keep a stale highlight), so
-            // clear the other segments. `None` means this segment didn't take
-            // part in the interaction — e.g. another segment's mouse-up also
-            // dispatches here — and clearing on it would wipe the selection
-            // that segment just made.
-            if args.selection.is_some() {
-                for handle in &other_handles {
-                    handle.clear();
+            // An empty payload means "no live selection in this segment": it's
+            // either a `None` (this area merely saw another segment's mouse
+            // event) or the empty `Some("")` a mouse-down / bare click reports
+            // before any text is dragged over. Treat both the same — only the
+            // owner may clear the shared text, and crucially neither path
+            // pulls focus. A mouse-down's empty `Some("")` used to dispatch
+            // `FocusPanel`, whose `focus_self` re-renders and rebuilds this
+            // `SelectableArea` with a `None` origin; a fast drag then reaches
+            // mouse-up before the next paint restores the origin, so the
+            // owner can't materialize its text and wipes its own `guard`
+            // (highlight visible, Cmd/Ctrl+C copies nothing). Focus is already
+            // bootstrapped in `select_commit`, so the empty payload needs no
+            // refocus at all.
+            let text = args.selection.unwrap_or_default();
+            if text.is_empty() {
+                if let Ok(mut guard) = selected_text.write() {
+                    if guard.as_ref().is_some_and(|(owner, _)| *owner == index) {
+                        *guard = None;
+                    }
                 }
+                return;
             }
-            // When the selection goes from "none" to "some", pull focus back
-            // into this view: selection relies on hit-testing and doesn't
-            // move focus, so if focus has since left (e.g. pasting the last
-            // copied content into an editor, clicking elsewhere), not
-            // refocusing would keep later Cmd/Ctrl+C from reaching
-            // CopySelection (showing up as "the first copy works, later ones
-            // don't").
-            let was_empty = selected_text.read().map(|g| g.is_none()).unwrap_or(true);
-            if was_empty && args.selection.is_some() {
-                ctx.dispatch_typed_action(GitGraphAction::FocusPanel);
+            // A non-empty selection: this segment owns it. Clear the others
+            // (once one area handles a mouse-down the rest no longer see it
+            // and would keep a stale highlight) and take over the shared text
+            // under this segment's tag — the tag stops another segment's
+            // later empty report from wiping it.
+            for handle in &other_handles {
+                handle.clear();
             }
+            let took_ownership = selected_text
+                .read()
+                .map(|g| !g.as_ref().is_some_and(|(owner, _)| *owner == index))
+                .unwrap_or(true);
             if let Ok(mut guard) = selected_text.write() {
-                *guard = args.selection;
+                *guard = Some((index, text));
+            }
+            // Re-bootstrap focus only when this segment newly takes ownership
+            // (not on every drag tick), so the re-render its `focus_self`
+            // triggers lands after the text is already materialized. This
+            // covers the case where focus has since left the panel (e.g.
+            // pasting the last copy into an editor) and a fresh drag-select
+            // must pull it back for Cmd/Ctrl+C to reach `CopySelection`.
+            if took_ownership {
+                ctx.dispatch_typed_action(GitGraphAction::FocusPanel);
             }
         },
         segment,
@@ -3518,7 +3543,7 @@ fn render_identity_row(
     identity: String,
     mouse_states: (MouseStateHandle, MouseStateHandle),
     selection_handles: &[SelectionHandle; 3],
-    selected_text: &Arc<RwLock<Option<String>>>,
+    selected_text: &Arc<RwLock<Option<(usize, String)>>>,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let (row_mouse_state, card_mouse_state) = mouse_states;
@@ -3644,7 +3669,7 @@ fn render_detail_body(
     detail: &CommitDetail,
     scroll_state: ClippedScrollStateHandle,
     selection_handles: &[SelectionHandle; 3],
-    selected_text: Arc<RwLock<Option<String>>>,
+    selected_text: Arc<RwLock<Option<(usize, String)>>>,
     author_mouse_states: (MouseStateHandle, MouseStateHandle),
     committer_mouse_states: (MouseStateHandle, MouseStateHandle),
     file_mouse_states: &[MouseStateHandle],
@@ -4045,7 +4070,7 @@ impl TypedActionView for GitGraphView {
                     .detail_selected_text
                     .read()
                     .ok()
-                    .and_then(|guard| guard.clone())
+                    .and_then(|guard| guard.as_ref().map(|(_, text)| text.clone()))
                     .filter(|t| !t.is_empty());
                 if let Some(text) = text {
                     ctx.clipboard().write(ClipboardContent::plain_text(text));

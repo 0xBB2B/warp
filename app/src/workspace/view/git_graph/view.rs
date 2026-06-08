@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_channel::Sender;
 use pathfinder_color::ColorU;
@@ -34,10 +34,11 @@ use warpui::elements::{
     resizable_state_handle, Align, Border, ChildAnchor, ChildView, ClippedScrollStateHandle,
     ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
     DragBarSide, Element, Empty, Expanded, Fill, Flex, Highlight, Hoverable, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, OffsetPositioning, ParentElement, PositionedElementAnchor,
-    PositionedElementOffsetBounds, Radius, Resizable, ResizableStateHandle, SavePosition,
-    ScrollStateHandle, Scrollable, ScrollableElement, ScrollbarWidth, SelectableArea,
-    SelectionHandle, Shrinkable, Stack, Text, UniformList, UniformListState,
+    MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement,
+    ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
+    ResizableStateHandle, SavePosition, ScrollStateHandle, Scrollable, ScrollableElement,
+    ScrollbarWidth, SelectableArea, SelectionHandle, Shrinkable, Stack, Text, UniformList,
+    UniformListState,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::geometry::vector::{vec2f, Vector2F};
@@ -375,12 +376,24 @@ pub(crate) struct GitGraphView {
     detail_height_initialized: Arc<AtomicBool>,
     /// Mouse state of the detail area's close button.
     detail_close_mouse_state: MouseStateHandle,
-    /// Text selection state of the detail area (drag-selection), preserved
-    /// across re-renders.
-    detail_selection_handle: SelectionHandle,
-    /// Text currently selected in the detail area, for Cmd/Ctrl+C copy; written
-    /// by the [`SelectableArea`] callback.
+    /// Text selection states of the detail area's drag-selectable segments
+    /// (subject / hash + body / the identity hover card), preserved across
+    /// re-renders. Separate segments because the author / committer rows
+    /// between the texts are hover elements rather than selectable text; a
+    /// segment's selection callback clears the other handles, since once one
+    /// [`SelectableArea`] handles a mouse-down the others no longer see it and
+    /// would keep a stale highlight. The author and committer cards share the
+    /// third handle (only one card can be open at a time).
+    detail_selection_handles: [SelectionHandle; 3],
+    /// Text currently selected in the detail area (in whichever segment), for
+    /// Cmd/Ctrl+C copy; written by the [`SelectableArea`] callbacks.
     detail_selected_text: Arc<RwLock<Option<String>>>,
+    /// Hover states of the detail area's author and committer rows and their
+    /// floating identity cards, as `(row, card)` pairs: hovering the row opens
+    /// the card, and hovering the card keeps it open so its `name <email>`
+    /// text can be drag-selected.
+    detail_author_mouse_states: (MouseStateHandle, MouseStateHandle),
+    detail_committer_mouse_states: (MouseStateHandle, MouseStateHandle),
     /// Mouse state of the detail area's changed-file rows (for hover highlight /
     /// click to open diff), same length as the current detail's files.
     detail_file_mouse_states: Arc<Vec<MouseStateHandle>>,
@@ -618,8 +631,10 @@ impl GitGraphView {
             detail_resizable_state: resizable_state_handle(220.0),
             detail_height_initialized: Arc::new(AtomicBool::new(false)),
             detail_close_mouse_state: MouseStateHandle::default(),
-            detail_selection_handle: SelectionHandle::default(),
+            detail_selection_handles: Default::default(),
             detail_selected_text: Arc::new(RwLock::new(None)),
+            detail_author_mouse_states: Default::default(),
+            detail_committer_mouse_states: Default::default(),
             detail_file_mouse_states: Arc::new(Vec::new()),
             detail_collapsed_dirs: HashSet::new(),
             detail_dir_mouse_states: Arc::new(HashMap::new()),
@@ -996,7 +1011,9 @@ impl GitGraphView {
     /// Clears the detail area's text selection state (called when switching
     /// commits / closing the detail, to avoid stale selection coordinates).
     fn clear_detail_text_selection(&mut self) {
-        self.detail_selection_handle.clear();
+        for handle in &self.detail_selection_handles {
+            handle.clear();
+        }
         if let Ok(mut guard) = self.detail_selected_text.write() {
             *guard = None;
         }
@@ -1917,8 +1934,10 @@ impl GitGraphView {
                     commit,
                     detail,
                     self.detail_scroll_state.clone(),
-                    self.detail_selection_handle.clone(),
+                    &self.detail_selection_handles,
                     self.detail_selected_text.clone(),
+                    self.detail_author_mouse_states.clone(),
+                    self.detail_committer_mouse_states.clone(),
                     &self.detail_file_mouse_states,
                     &self.detail_dir_mouse_states,
                     &self.detail_collapsed_dirs,
@@ -3402,11 +3421,12 @@ fn render_ref_badge(
     }
 }
 
-/// Converts a Unix-seconds timestamp into a relative-time string (just now /
-/// N minutes ago / N hours ago / N days ago / N months ago / N years ago).
-/// Computed against the system's current time; a negative diff (e.g. from a
-/// clock that's been set back) falls back to "just now".
-fn relative_time(unix_secs: i64) -> String {
+/// Formats a Unix-seconds timestamp for the detail area. Within 24 hours of
+/// the system's current time it stays relative (just now / N minutes ago /
+/// N hours ago); anything older becomes an absolute `yyyy-MM-dd HH:mm:ss` in
+/// the system's local timezone. A negative diff (e.g. from a clock that's
+/// been set back) falls back to "just now".
+fn detail_time(unix_secs: i64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -3422,19 +3442,143 @@ fn relative_time(unix_secs: i64) -> String {
             let n = diff / 3_600;
             format!("{n} hour{} ago", if n == 1 { "" } else { "s" })
         }
-        86_400..=2_591_999 => {
-            let n = diff / 86_400;
-            format!("{n} day{} ago", if n == 1 { "" } else { "s" })
-        }
-        2_592_000..=31_103_999 => {
-            let n = diff / 2_592_000;
-            format!("{n} month{} ago", if n == 1 { "" } else { "s" })
-        }
-        _ => {
-            let n = diff / 31_536_000;
-            format!("{n} year{} ago", if n == 1 { "" } else { "s" })
-        }
+        // `from_timestamp` is None only for out-of-range timestamps; fall back
+        // to the raw seconds rather than showing nothing.
+        _ => chrono::DateTime::from_timestamp(unix_secs, 0)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            })
+            .unwrap_or_else(|| unix_secs.to_string()),
     }
+}
+
+/// Wraps one drag-selectable detail segment (subject / hash + body / the
+/// identity card's text) in a [`SelectableArea`] driving `handles[index]` and
+/// writing the selected text into `selected_text` for Cmd/Ctrl+C copy.
+fn detail_selection_area(
+    segment: Box<dyn Element>,
+    handles: &[SelectionHandle; 3],
+    index: usize,
+    selected_text: &Arc<RwLock<Option<String>>>,
+) -> Box<dyn Element> {
+    let selected_text = selected_text.clone();
+    let other_handles: Vec<SelectionHandle> = handles
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .map(|(_, handle)| handle.clone())
+        .collect();
+    SelectableArea::new(
+        handles[index].clone(),
+        move |args, ctx, _| {
+            // `Some` means this segment handled the click and now owns the
+            // selection (a mouse-down it handles never reaches the other
+            // segments, which would otherwise keep a stale highlight), so
+            // clear the other segments. `None` means this segment didn't take
+            // part in the interaction — e.g. another segment's mouse-up also
+            // dispatches here — and clearing on it would wipe the selection
+            // that segment just made.
+            if args.selection.is_some() {
+                for handle in &other_handles {
+                    handle.clear();
+                }
+            }
+            // When the selection goes from "none" to "some", pull focus back
+            // into this view: selection relies on hit-testing and doesn't
+            // move focus, so if focus has since left (e.g. pasting the last
+            // copied content into an editor, clicking elsewhere), not
+            // refocusing would keep later Cmd/Ctrl+C from reaching
+            // CopySelection (showing up as "the first copy works, later ones
+            // don't").
+            let was_empty = selected_text.read().map(|g| g.is_none()).unwrap_or(true);
+            if was_empty && args.selection.is_some() {
+                ctx.dispatch_typed_action(GitGraphAction::FocusPanel);
+            }
+            if let Ok(mut guard) = selected_text.write() {
+                *guard = args.selection;
+            }
+        },
+        segment,
+    )
+    .finish()
+}
+
+/// Renders one dimmed author / committer metadata row (`label`, e.g.
+/// `name · time`). The row isn't part of the detail's drag-selectable text;
+/// instead, hovering it opens a floating card with the full `identity`
+/// (`name <email>`), whose text is itself drag-selectable and copied with
+/// Cmd/Ctrl+C like the rest of the detail. The card stays open while the
+/// mouse is over it — the row's hover-out delay leaves time to move the mouse
+/// into the card — and is an overlay so the detail area's scroll clipping
+/// can't cut it off.
+fn render_identity_row(
+    label: String,
+    identity: String,
+    mouse_states: (MouseStateHandle, MouseStateHandle),
+    selection_handles: &[SelectionHandle; 3],
+    selected_text: &Arc<RwLock<Option<String>>>,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    let (row_mouse_state, card_mouse_state) = mouse_states;
+    let theme = appearance.theme();
+    let dim: ColorU = theme.sub_text_color(theme.background()).into();
+    let fg: ColorU = theme.foreground().into();
+    let font = appearance.ui_font_family();
+    let size = appearance.ui_font_size();
+
+    // The card: the selectable identity text on the panel background, kept
+    // visually distinct from the panel by a border. Wrapped in its own
+    // Hoverable so the card can keep itself open under the mouse.
+    let card_text = Text::new_inline(identity, font, size)
+        .with_color(fg)
+        .with_selectable(true)
+        .finish();
+    let card_body = Container::new(detail_selection_area(
+        card_text,
+        selection_handles,
+        2,
+        selected_text,
+    ))
+    .with_background(theme.background())
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+    .with_border(Border::all(1.).with_border_fill(theme.outline()))
+    .with_vertical_padding(4.)
+    .with_horizontal_padding(8.)
+    .finish();
+    let card_state = card_mouse_state.clone();
+    let card = Hoverable::new(card_mouse_state, move |_| card_body).finish();
+
+    Hoverable::new(row_mouse_state, move |row_state| {
+        let text = Text::new_inline(label, font, size).with_color(dim).finish();
+        let mut stack = Stack::new();
+        stack.add_child(text);
+        // Keep the card mounted while the mouse is over the card itself, not
+        // just the row — that's what makes the card's text reachable and
+        // drag-selectable at all.
+        let card_hovered = card_state
+            .lock()
+            .map(|state| state.is_hovered())
+            .unwrap_or(false);
+        if row_state.is_hovered() || card_hovered {
+            stack.add_positioned_overlay_child(
+                card,
+                OffsetPositioning::offset_from_parent(
+                    vec2f(0., -4.),
+                    ParentOffsetBounds::WindowByPosition,
+                    ParentAnchor::TopLeft,
+                    ChildAnchor::BottomLeft,
+                ),
+            );
+        }
+        stack.finish()
+    })
+    // The grace period for moving the mouse from the row into the card: the
+    // row stays "hovered" long enough to cross the gap without the card
+    // unmounting mid-way.
+    .with_hover_out_delay(Duration::from_millis(300))
+    .finish()
 }
 
 /// Takes the body of the commit's full message (`%B`) with the first line (shown
@@ -3483,22 +3627,26 @@ fn render_diff_counts(
 }
 
 /// Renders the body of the detail area: the layered commit metadata (subject /
-/// author · time / (committer) / short hash / body) + ref badges + changed-file
-/// area.
+/// author rows / full hash / body) + ref badges + changed-file area.
 ///
-/// The metadata segments build a visual hierarchy (bold subject, dimmed author
-/// and hash) but are carried in a single [`Text`] (using char-range highlights
-/// for the levels) wrapped in one [`SelectableArea`] — a single Text is what
-/// makes its drag-select copy work reliably; splitting into multiple Texts would
-/// break cross-segment selection so a drag-select couldn't be copied. The ref
-/// badges and file area sit outside the SelectableArea and aren't part of the
-/// selection.
+/// The metadata is split into drag-selectable [`Text`]s — subject (bold) and
+/// hash + body — around the dimmed author / committer rows, which are hover
+/// elements instead of selectable text: hovering one opens a floating card
+/// with the full `name <email>`, itself drag-selectable (the third selection
+/// segment). A [`SelectableArea`] needs a single Text child for its
+/// drag-select copy to work, so each segment gets its own; their callbacks
+/// clear the other handles so a stale highlight can't linger in another
+/// segment. The ref badges and file area sit outside the SelectableAreas and
+/// aren't part of the selection.
+#[allow(clippy::too_many_arguments)]
 fn render_detail_body(
     commit: Option<&CommitNode>,
     detail: &CommitDetail,
     scroll_state: ClippedScrollStateHandle,
-    selection_handle: SelectionHandle,
+    selection_handles: &[SelectionHandle; 3],
     selected_text: Arc<RwLock<Option<String>>>,
+    author_mouse_states: (MouseStateHandle, MouseStateHandle),
+    committer_mouse_states: (MouseStateHandle, MouseStateHandle),
     file_mouse_states: &[MouseStateHandle],
     dir_mouse_states: &HashMap<String, MouseStateHandle>,
     collapsed_dirs: &HashSet<String>,
@@ -3510,12 +3658,7 @@ fn render_detail_body(
     let fg: ColorU = theme.foreground().into();
     let dim: ColorU = theme.sub_text_color(theme.background()).into();
 
-    // ---- Selectable metadata: subject (bold) / author · time / (committer) /
-    // full hash / body ----
-    // Carried in a single [`Text`], using char-range highlights for the levels.
-    // A single Text is the prerequisite for [`SelectableArea`]'s drag-select
-    // copy to work reliably — splitting into multiple Texts would break
-    // cross-segment selection, so a drag-select couldn't be copied.
+    // ---- Segment 1: subject (bold, selectable) ----
     let subject = commit.map(|c| c.subject.clone()).unwrap_or_else(|| {
         detail
             .message
@@ -3524,72 +3667,90 @@ fn render_detail_body(
             .unwrap_or_default()
             .to_string()
     });
-    let mut meta_text = subject;
-    let subject_chars = meta_text.chars().count();
-
-    // Dimmed segment: author · time / (committer · time) / full hash.
-    let mut dim_range: Option<Range<usize>> = None;
-    if let Some(c) = commit {
-        meta_text.push_str("\n\n");
-        let start = meta_text.chars().count();
-        meta_text.push_str(&format!(
-            "{} · {}",
-            c.author_name,
-            relative_time(c.author_time)
-        ));
-        // Add a line only when the committer differs from the author
-        // (cherry-pick / rebase / amend, etc.).
-        if detail.committer_name != c.author_name {
-            meta_text.push_str(&format!(
-                "\ncommitted by {} · {}",
-                detail.committer_name,
-                relative_time(detail.committer_time)
-            ));
-        }
-        meta_text.push('\n');
-        meta_text.push_str(&c.hash);
-        dim_range = Some(start..meta_text.chars().count());
-    }
-
-    // Body: the full message with the first line (used as the subject) removed;
-    // if empty, append nothing.
-    let body = detail_message_body(&detail.message);
-    if !body.is_empty() {
-        meta_text.push_str("\n\n");
-        meta_text.push_str(&body);
-    }
-
-    let mut meta = Text::new(meta_text, font, size)
+    let subject_text = Text::new(subject, font, size)
         .with_color(fg)
         .with_selectable(true)
-        .with_single_highlight(
-            Highlight::new().with_properties(Properties::default().weight(Weight::Bold)),
-            (0..subject_chars).collect(),
+        .with_style(Properties::default().weight(Weight::Bold))
+        .finish();
+    let mut meta_col = Flex::column()
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_child(detail_selection_area(
+            subject_text,
+            selection_handles,
+            0,
+            &selected_text,
+        ));
+
+    // ---- Author / committer rows (dimmed; hovering opens the identity card
+    // with the drag-selectable `name <email>`) ----
+    if let Some(c) = commit {
+        let author_row = render_identity_row(
+            format!("{} · {}", c.author_name, detail_time(c.author_time)),
+            format!("{} <{}>", c.author_name, c.author_email),
+            author_mouse_states,
+            selection_handles,
+            &selected_text,
+            appearance,
         );
-    if let Some(range) = dim_range {
-        meta = meta
-            .with_single_highlight(Highlight::new().with_foreground_color(dim), range.collect());
+        // The margin stands in for the blank line that separated the subject
+        // from the author row when the metadata was one text block.
+        meta_col = meta_col.with_child(Container::new(author_row).with_margin_top(size).finish());
+        // Add a row only when the committer differs from the author
+        // (cherry-pick / rebase / amend, etc.).
+        if detail.committer_name != c.author_name {
+            meta_col = meta_col.with_child(render_identity_row(
+                format!(
+                    "committed by {} · {}",
+                    detail.committer_name,
+                    detail_time(detail.committer_time)
+                ),
+                format!("{} <{}>", detail.committer_name, detail.committer_email),
+                committer_mouse_states,
+                selection_handles,
+                &selected_text,
+                appearance,
+            ));
+        }
     }
-    let selectable_meta = SelectableArea::new(
-        selection_handle,
-        move |args, ctx, _| {
-            // When the selection goes from "none" to "some", pull focus back
-            // into this view: selection relies on hit-testing and doesn't move
-            // focus, so if focus has since left (e.g. pasting the last copied
-            // content into an editor, clicking elsewhere), not refocusing would
-            // keep later Cmd/Ctrl+C from reaching CopySelection (showing up as
-            // "the first copy works, later ones don't").
-            let was_empty = selected_text.read().map(|g| g.is_none()).unwrap_or(true);
-            if was_empty && args.selection.is_some() {
-                ctx.dispatch_typed_action(GitGraphAction::FocusPanel);
-            }
-            if let Ok(mut guard) = selected_text.write() {
-                *guard = args.selection;
-            }
-        },
-        meta.finish(),
-    )
-    .finish();
+
+    // ---- Segment 2: full hash (dimmed) + body (selectable) ----
+    // Body: the full message with the first line (used as the subject) removed;
+    // if empty, append nothing.
+    let mut tail_text = commit.map(|c| c.hash.clone()).unwrap_or_default();
+    let hash_chars = tail_text.chars().count();
+    let body = detail_message_body(&detail.message);
+    if !body.is_empty() {
+        if !tail_text.is_empty() {
+            tail_text.push_str("\n\n");
+        }
+        tail_text.push_str(&body);
+    }
+    if !tail_text.is_empty() {
+        let mut tail = Text::new(tail_text, font, size)
+            .with_color(fg)
+            .with_selectable(true);
+        if hash_chars > 0 {
+            tail = tail.with_single_highlight(
+                Highlight::new().with_foreground_color(dim),
+                (0..hash_chars).collect(),
+            );
+        }
+        // Without a commit (the uncommitted row) there are no author/hash rows
+        // above, so the body needs the blank-line margin under the subject
+        // itself.
+        let margin_top = if commit.is_some() { 0. } else { size };
+        meta_col = meta_col.with_child(
+            Container::new(detail_selection_area(
+                tail.finish(),
+                selection_handles,
+                1,
+                &selected_text,
+            ))
+            .with_margin_top(margin_top)
+            .finish(),
+        );
+    }
+    let selectable_meta = meta_col.finish();
 
     // ---- File area: top divider line + summary (N files changed / total
     // additions and deletions) + file rows ----

@@ -551,6 +551,7 @@ pub(crate) struct ChangedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitDetail {
     pub committer_name: String,
+    pub committer_email: String,
     pub committer_time: i64,
     /// Full commit message (`%B`, including subject and body).
     pub message: String,
@@ -565,18 +566,19 @@ pub(crate) async fn load_commit_detail(repo_root: &Path, hash: &str) -> Result<C
         "show",
         "--numstat",
         "--no-color",
-        "--format=%cn%x1f%ct%x1f%B%x1e",
+        "--format=%cn%x1f%ce%x1f%ct%x1f%B%x1e",
         hash,
     ];
     let stdout = warp_util::git::run_git_command(repo_root, &args).await?;
     Ok(parse_commit_detail(&stdout))
 }
 
-/// Parse the output of `git show --numstat --format=%cn%x1f%ct%x1f%B%x1e`.
+/// Parse the output of `git show --numstat --format=%cn%x1f%ce%x1f%ct%x1f%B%x1e`.
 pub(crate) fn parse_commit_detail(stdout: &str) -> CommitDetail {
     let (header, numstat) = stdout.split_once(RECORD_SEP).unwrap_or((stdout, ""));
-    let mut fields = header.splitn(3, UNIT_SEP);
+    let mut fields = header.splitn(4, UNIT_SEP);
     let committer_name = fields.next().unwrap_or("").to_string();
+    let committer_email = fields.next().unwrap_or("").to_string();
     let committer_time = fields
         .next()
         .and_then(|s| s.trim().parse::<i64>().ok())
@@ -585,6 +587,7 @@ pub(crate) fn parse_commit_detail(stdout: &str) -> CommitDetail {
 
     CommitDetail {
         committer_name,
+        committer_email,
         committer_time,
         message,
         files: parse_numstat(numstat),
@@ -835,6 +838,7 @@ pub(crate) async fn load_uncommitted_detail(repo_root: &Path) -> Result<CommitDe
     }
     Ok(CommitDetail {
         committer_name: String::new(),
+        committer_email: String::new(),
         committer_time: 0,
         // Used as the detail's subject line (render_detail_body falls back to the
         // message when there's no commit).

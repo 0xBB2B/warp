@@ -193,7 +193,7 @@ fn parse_decorate_ignores_unknown_tokens() {
 #[test]
 fn parse_commit_detail_extracts_header_and_files() {
     let input = format!(
-        "Bob Committer{US}1700000050{US}Subject line\n\nBody paragraph.{RS}\n\
+        "Bob Committer{US}bob@example.com{US}1700000050{US}Subject line\n\nBody paragraph.{RS}\n\
          3\t1\tsrc/main.rs\n0\t0\tREADME.md\n-\t-\tlogo.png\n",
         US = UNIT_SEP,
         RS = RECORD_SEP,
@@ -201,6 +201,7 @@ fn parse_commit_detail_extracts_header_and_files() {
     let detail = parse_commit_detail(&input);
 
     assert_eq!(detail.committer_name, "Bob Committer");
+    assert_eq!(detail.committer_email, "bob@example.com");
     assert_eq!(detail.committer_time, 1_700_000_050);
     // The full message retains both subject and body.
     assert_eq!(detail.message, "Subject line\n\nBody paragraph.");
@@ -252,7 +253,11 @@ fn parse_numstat_normalizes_renamed_paths() {
 
 #[test]
 fn parse_commit_detail_handles_empty_numstat() {
-    let input = format!("Ann{US}100{US}msg{RS}", US = UNIT_SEP, RS = RECORD_SEP);
+    let input = format!(
+        "Ann{US}ann@example.com{US}100{US}msg{RS}",
+        US = UNIT_SEP,
+        RS = RECORD_SEP
+    );
     let detail = parse_commit_detail(&input);
 
     assert_eq!(detail.message, "msg");

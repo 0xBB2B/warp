@@ -35,7 +35,7 @@ use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
-use super::select_unique_pane_kinds;
+use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
 use crate::ai::agent_management::AgentNotificationsModel;
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
@@ -301,6 +301,39 @@ struct TabGroupMouseStates {
     close: MouseStateHandle,
 }
 
+/// Describes how a pane row sits in its tab's row layout. Carried as state
+/// on `PaneProps`; the actual corner radius is derived at render time.
+#[derive(Clone, Copy)]
+enum PaneRowStackPosition {
+    /// Rendered with normal vertical spacing; row's background fully rounds.
+    Standalone,
+    /// Stacked flush against siblings (no inter-row gap); only the outer
+    /// (first/last) corners round so adjacent backgrounds meet edge-to-edge.
+    Flush { is_first: bool, is_last: bool },
+}
+
+impl PaneRowStackPosition {
+    /// Resting corner radius for the row's background — derived from its
+    /// position in the stack alone, before hover/selected overrides.
+    fn corner_radius(self) -> CornerRadius {
+        match self {
+            PaneRowStackPosition::Standalone => {
+                CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS))
+            }
+            PaneRowStackPosition::Flush { is_first, is_last } => {
+                let mut cr = CornerRadius::default();
+                if is_first {
+                    cr.merge(CornerRadius::with_top(Radius::Pixels(ROW_CORNER_RADIUS)));
+                }
+                if is_last {
+                    cr.merge(CornerRadius::with_bottom(Radius::Pixels(ROW_CORNER_RADIUS)));
+                }
+                cr
+            }
+        }
+    }
+}
+
 fn pane_row_background(
     pane_color: Option<ThemeFill>,
     is_selected: bool,
@@ -357,7 +390,9 @@ fn render_pane_row_element(
         is_focused,
         typed: _,
         is_being_dragged,
+        stack_position,
         is_in_multi_selection,
+        is_in_multi_tab_selection,
         pane_color,
         badge_mouse_states: _,
         detail_hover_state,
@@ -371,9 +406,16 @@ fn render_pane_row_element(
     } = props;
     let is_selected = is_active_tab && is_focused;
     let mut row = Hoverable::new(mouse_state, move |state| {
+        // Hovered or selected rows always fully round; otherwise derive the
+        // resting radius from the row's stack position.
+        let corner_radius = if state.is_hovered() || is_selected {
+            CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS))
+        } else {
+            stack_position.corner_radius()
+        };
         let mut container = Container::new(Clipped::new(content).finish())
             .with_padding(padding)
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
+            .with_corner_radius(corner_radius);
 
         if let Some(background) = pane_row_background(
             pane_color,
@@ -480,11 +522,21 @@ fn render_pane_row_element(
     }
     if let Some(tab_index) = pane_context_menu_tab_index {
         row = row.on_right_click(move |ctx, _, position| {
-            ctx.dispatch_typed_action(WorkspaceAction::ToggleVerticalTabsPaneContextMenu {
-                tab_index,
-                target: VerticalTabsPaneContextMenuTarget::ClickedPane(pane_locator),
-                position,
-            });
+            let anchor = TabContextMenuAnchor::Pointer(position);
+            if is_in_multi_tab_selection {
+                ctx.dispatch_typed_action(WorkspaceAction::ToggleTabSelectionRightClickMenu {
+                    tab_index,
+                    anchor,
+                });
+            } else {
+                // Right-clicking outside the multi-selection cancels it.
+                ctx.dispatch_typed_action(WorkspaceAction::ClearTabMultiSelection);
+                ctx.dispatch_typed_action(WorkspaceAction::ToggleVerticalTabsPaneContextMenu {
+                    tab_index,
+                    target: VerticalTabsPaneContextMenuTarget::ClickedPane(pane_locator),
+                    position,
+                });
+            }
         });
     }
 
@@ -735,9 +787,16 @@ struct PaneProps<'a> {
     is_focused: bool,
     typed: TypedPane<'a>,
     is_being_dragged: bool,
+    /// Where this row sits in its tab's row stack. Drives corner-radius
+    /// derivation at render time; defaults to `Standalone`.
+    stack_position: PaneRowStackPosition,
     /// True when this row's tab is part of the active multi-selection
     /// (shift-click range or cmd-click toggle).
     is_in_multi_selection: bool,
+    /// True when the row's tab is part of a multi-tab (count > 1) selection.
+    /// The right-click handler dispatches the selection menu when set,
+    /// otherwise the single-pane menu.
+    is_in_multi_tab_selection: bool,
     pane_color: Option<ThemeFill>,
     badge_mouse_states: PaneRowBadgeMouseStates,
     detail_hover_state: VerticalTabsDetailHoverState,
@@ -1104,6 +1163,7 @@ impl VerticalTabsPanelState {
                                 pane_id,
                                 tab.pane_group.id(),
                                 *tab_index == active_tab_index,
+                                false,
                                 false,
                                 PaneRowState {
                                     mouse_state: ms,
@@ -1673,6 +1733,7 @@ fn render_groups(
                                     tab.pane_group.id(),
                                     tab_index == workspace.active_tab_index,
                                     false,
+                                    false,
                                     PaneRowState {
                                         mouse_state: ms,
                                         title_mouse_state: None,
@@ -1700,6 +1761,7 @@ fn render_groups(
                                 pane_id,
                                 tab.pane_group.id(),
                                 tab_index == workspace.active_tab_index,
+                                false,
                                 false,
                                 PaneRowState {
                                     mouse_state,
@@ -1959,14 +2021,27 @@ fn render_tab_group_internal(
     let is_this_tab_dragging = tab.draggable_state.is_dragging();
     // Panes inherit multi-selection status from the tab they belong to.
     let is_in_multi_selection = tab.in_multi_selection;
+    // Captured into row/group right-click closures so they can pick between
+    // the single-pane menu and the multi-tab selection menu.
+    let is_in_multi_tab_selection = workspace.is_tab_in_multi_tab_selection(tab_index);
     let color_mode = compute_tab_group_color_mode(tab, pane_group, &visible_pane_ids, theme, app);
     let per_pane_colors = color_mode.into_per_pane_colors(&visible_pane_ids);
     let is_being_renamed = is_active && workspace.current_workspace_state.is_tab_being_renamed();
     let rename_editor = workspace.tab_rename_editor.clone();
     let has_custom_title = pane_group.custom_title(app).is_some();
-    let displayed_tab_title_override = (!uses_outer_group_container)
-        .then(|| pane_group.custom_title(app))
-        .flatten();
+    // In Panes view, tabs inside a group render individual pane rows, so each
+    // pane keeps its own generated title. Propagating the tab's custom title as
+    // an override here would shadow every pane's title with the same string.
+    // In Tabs/Summary modes there is only one row per tab, so the tab-level
+    // custom title is still the right thing to show.
+    let displayed_tab_title_override =
+        if in_tab_group && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes) {
+            None
+        } else {
+            (!uses_outer_group_container)
+                .then(|| pane_group.custom_title(app))
+                .flatten()
+        };
     let is_menu_open_for_tab = workspace
         .show_tab_right_click_menu
         .is_some_and(|(idx, _)| idx == tab_index);
@@ -1982,11 +2057,19 @@ fn render_tab_group_internal(
     };
 
     let mut group_element = Hoverable::new(group_mouse_state, move |group_state| {
+        // GroupedTabs: stack panes flush in Panes view.
+        let stack_panes_flush = FeatureFlag::GroupedTabs.is_enabled()
+            && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes);
+        let row_spacing = if stack_panes_flush {
+            0.
+        } else {
+            GROUP_ITEM_SPACING
+        };
         let build_rows = || {
             let mut rows = Flex::column()
                 .with_main_axis_size(MainAxisSize::Min)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_spacing(GROUP_ITEM_SPACING);
+                .with_spacing(row_spacing);
             if matches!(resolved_mode, VerticalTabsResolvedMode::Summary) {
                 let Some((pane_id, row_mouse_state)) = row_mouse_states.first() else {
                     return Empty::new().finish();
@@ -2007,6 +2090,7 @@ fn render_tab_group_internal(
                     pane_group_id,
                     is_active,
                     is_in_multi_selection,
+                    is_in_multi_tab_selection,
                     PaneRowState {
                         mouse_state: row_mouse_state.clone(),
                         title_mouse_state: None,
@@ -2037,7 +2121,8 @@ fn render_tab_group_internal(
                 ));
                 return rows.finish();
             }
-            for (pane_id, row_mouse_state) in &row_mouse_states {
+            let total_rows = row_mouse_states.len();
+            for (row_idx, (pane_id, row_mouse_state)) in row_mouse_states.iter().enumerate() {
                 let pane_color = per_pane_colors
                     .as_ref()
                     .and_then(|map| map.get(pane_id).copied())
@@ -2055,12 +2140,13 @@ fn render_tab_group_internal(
                 let is_pane_being_renamed = workspace
                     .current_workspace_state
                     .is_pane_being_renamed(locator);
-                let Some(pane_props) = PaneProps::new(
+                let Some(mut pane_props) = PaneProps::new(
                     pane_group,
                     *pane_id,
                     pane_group_id,
                     is_active,
                     is_in_multi_selection,
+                    is_in_multi_tab_selection,
                     PaneRowState {
                         mouse_state: row_mouse_state.clone(),
                         title_mouse_state: title_mouse_states.get(pane_id).cloned(),
@@ -2081,6 +2167,12 @@ fn render_tab_group_internal(
                 ) else {
                     continue;
                 };
+                if stack_panes_flush {
+                    pane_props.stack_position = PaneRowStackPosition::Flush {
+                        is_first: row_idx == 0,
+                        is_last: row_idx + 1 == total_rows,
+                    };
+                }
                 let view_mode = *TabSettings::as_ref(app).vertical_tabs_view_mode.value();
                 let row = match view_mode {
                     VerticalTabsViewMode::Compact => render_compact_pane_row(pane_props, app),
@@ -2146,28 +2238,35 @@ fn render_tab_group_internal(
             // hover/active state for the whole group, so suppress the
             // per-tab background here and let each row show its own
             // selected/hovered state.
+            let allow_per_tab_highlight = !in_tab_group || FeatureFlag::GroupedTabs.is_enabled();
             let background = if is_drag_target {
                 internal_colors::fg_overlay_2(theme)
-            } else if !in_tab_group && (is_active || group_state.is_hovered()) {
+            } else if allow_per_tab_highlight && (is_active || group_state.is_hovered()) {
                 internal_colors::fg_overlay_1(theme)
             } else {
                 ThemeFill::Solid(ColorU::transparent_black())
             };
-            // Pane view inside a tab group: reserve a top band so the action
-            // buttons (anchored to this wrapper's top-right) sit above the
-            // first pane row instead of overlaying its content, matching how
-            // regular pane view places them in the body's top padding.
+            // Top band reserved for the per-tab action buttons.
+            const GROUPED_TAB_ACTION_BUTTON_BAND: f32 = 4.;
             let needs_action_button_band = in_tab_group
                 && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes);
+            let action_button_band = if FeatureFlag::GroupedTabs.is_enabled() {
+                GROUPED_TAB_ACTION_BUTTON_BAND
+            } else {
+                GROUP_BODY_BOTTOM_PADDING
+            };
             let mut container = Container::new(build_rows()).with_background(background);
-            if needs_action_button_band {
+            if FeatureFlag::GroupedTabs.is_enabled() && stack_panes_flush {
                 container = container
-                    .with_padding(Padding::uniform(0.).with_top(GROUP_BODY_BOTTOM_PADDING));
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
             }
             if is_drag_target {
                 container = container.with_border(
                     Border::all(1.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
                 );
+            }
+            if needs_action_button_band {
+                container = container.with_margin_top(action_button_band);
             }
             container.finish()
         };
@@ -2229,10 +2328,19 @@ fn render_tab_group_internal(
         } else {
             -4.
         };
+        // GroupedTabs: pull the action buttons up to match the band of padding.
+        let action_button_y_offset = if FeatureFlag::GroupedTabs.is_enabled()
+            && in_tab_group
+            && matches!(display_granularity, VerticalTabsDisplayGranularity::Panes)
+        {
+            0.
+        } else {
+            GROUP_HEADER_VERTICAL_PADDING
+        };
         stack.add_positioned_overlay_child(
             action_buttons,
             OffsetPositioning::offset_from_parent(
-                vec2f(action_button_x_offset, GROUP_HEADER_VERTICAL_PADDING),
+                vec2f(action_button_x_offset, action_button_y_offset),
                 ParentOffsetBounds::WindowByPosition,
                 ParentAnchor::TopRight,
                 ChildAnchor::TopRight,
@@ -2241,11 +2349,23 @@ fn render_tab_group_internal(
         stack.finish()
     })
     .on_right_click(move |ctx, _, position| {
-        ctx.dispatch_typed_action(WorkspaceAction::ToggleVerticalTabsPaneContextMenu {
-            tab_index,
-            target: VerticalTabsPaneContextMenuTarget::ActivePane(active_pane_context_menu_target),
-            position,
-        });
+        let anchor = TabContextMenuAnchor::Pointer(position);
+        if is_in_multi_tab_selection {
+            ctx.dispatch_typed_action(WorkspaceAction::ToggleTabSelectionRightClickMenu {
+                tab_index,
+                anchor,
+            });
+        } else {
+            // Right-clicking outside the multi-selection cancels it.
+            ctx.dispatch_typed_action(WorkspaceAction::ClearTabMultiSelection);
+            ctx.dispatch_typed_action(WorkspaceAction::ToggleVerticalTabsPaneContextMenu {
+                tab_index,
+                target: VerticalTabsPaneContextMenuTarget::ActivePane(
+                    active_pane_context_menu_target,
+                ),
+                position,
+            });
+        }
     });
 
     // Mirror the horizontal-tab behavior: middle-click closes the tab, except when it would
@@ -2467,9 +2587,14 @@ fn render_tab_group_header_icon_button(
     .finish()
 }
 
-/// Renders the header row for a tab group: chevron, title + "N tabs", and (on hover)
-/// kebab + close buttons. Single-clicking outside the per-button regions toggles collapse;
-/// double-clicking opens the inline rename editor.
+/// Renders the header row for a tab group: leading icon (chevron when expanded,
+/// member icon collage when collapsed), title + "N tabs", and (on hover) kebab
+/// + close buttons. Single-clicking outside the per-button regions toggles
+/// collapse; double-clicking opens the inline rename editor.
+///
+/// `collapsed_member_kinds` is the deduped list of pane kinds used to build the
+/// icon collage shown in place of the chevron when the group is collapsed.
+/// Pass `None` when the group is expanded; the chevron is rendered instead.
 #[allow(clippy::too_many_arguments)]
 fn render_grouped_tabs_header(
     group: &TabGroup,
@@ -2480,6 +2605,7 @@ fn render_grouped_tabs_header(
     show_action_buttons: bool,
     is_being_renamed: bool,
     rename_editor: Option<&ViewHandle<EditorView>>,
+    collapsed_member_kinds: Option<&[SummaryPaneKind]>,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -2489,31 +2615,34 @@ fn render_grouped_tabs_header(
     let sub_text_color = theme.sub_text_color(theme.background());
     let group_id = group.id;
 
-    let chevron_icon = if is_collapsed {
-        WarpIcon::ChevronRight
+    // Collapsed groups show the icon collage (same component as horizontal tab
+    // groups) in place of the chevron, sized to VERTICAL_TABS_ICON_SIZE so
+    // the 2-icon variant matches the tab Summary Pair layout exactly.
+    let tab_group_icon = if is_collapsed {
+        let kinds = collapsed_member_kinds.unwrap_or(&[]);
+        render_group_member_icon_collage(kinds, VERTICAL_TABS_ICON_SIZE, appearance)
     } else {
-        WarpIcon::ChevronDown
-    };
-    let chevron_button = render_tab_group_header_icon_button(
-        chevron_icon,
-        TAB_GROUP_ICON_SIZE,
-        main_text_color,
-        internal_colors::fg_overlay_2(theme),
-        mouse_states.chevron.clone(),
-        Some(WorkspaceAction::ToggleTabGroupCollapsed(group_id)),
-    );
-    // Center the chevron in a `VERTICAL_TABS_ICON_SIZE` slot so the title aligns with member rows.
-    let chevron_slot = ConstrainedBox::new(
+        let chevron_button = render_tab_group_header_icon_button(
+            WarpIcon::ChevronDown,
+            TAB_GROUP_ICON_SIZE,
+            main_text_color,
+            internal_colors::fg_overlay_2(theme),
+            mouse_states.chevron.clone(),
+            Some(WorkspaceAction::ToggleTabGroupCollapsed(group_id)),
+        );
+        // Center the chevron in a `VERTICAL_TABS_ICON_SIZE` slot so the
+        // title aligns with member rows.
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::Center)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(chevron_button)
-            .finish(),
-    )
-    .with_width(VERTICAL_TABS_ICON_SIZE)
-    .with_height(VERTICAL_TABS_ICON_SIZE)
-    .finish();
+            .finish()
+    };
+    let tab_group_icon = ConstrainedBox::new(tab_group_icon)
+        .with_width(VERTICAL_TABS_ICON_SIZE)
+        .with_height(VERTICAL_TABS_ICON_SIZE)
+        .finish();
 
     let title_element: Box<dyn Element> =
         if let Some(editor) = rename_editor.filter(|_| is_being_renamed) {
@@ -2591,7 +2720,7 @@ fn render_grouped_tabs_header(
                     .with_main_axis_size(MainAxisSize::Max)
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
                     .with_spacing(ICON_WITH_STATUS_GAP)
-                    .with_child(chevron_slot)
+                    .with_child(tab_group_icon)
                     .with_child(Shrinkable::new(1., text_column).finish())
                     .finish(),
             )
@@ -2669,11 +2798,20 @@ fn render_grouped_tab_container(
         _ => VerticalTabsDisplayGranularity::Tabs,
     });
 
+    // GroupedTabs: zero inter-tab gap in Panes mode (each tab already has
+    // its own wrapper). Other modes keep `TABS_MODE_ITEM_SPACING`.
+    let member_tab_spacing = if FeatureFlag::GroupedTabs.is_enabled()
+        && matches!(resolved_mode, VerticalTabsResolvedMode::Panes)
+    {
+        0.
+    } else {
+        TABS_MODE_ITEM_SPACING
+    };
     let container = Hoverable::new(mouse_states.container.clone(), |hover_state| {
         let mut content = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(TABS_MODE_ITEM_SPACING);
+            .with_spacing(member_tab_spacing);
 
         // Collapsed group + active member: highlight the header instead of the (now hidden) member row.
         let is_header_selected = is_collapsed && any_member_active;
@@ -2681,6 +2819,10 @@ fn render_grouped_tab_container(
             .current_workspace_state
             .is_tab_group_being_renamed(group.id);
         let rename_editor = is_being_renamed.then(|| workspace.tab_group_rename_editor.clone());
+        // Compute member kinds only when collapsed — the collage is only
+        // rendered then, so this skips the per-tab pane walk when expanded.
+        let collapsed_member_kinds =
+            is_collapsed.then(|| workspace.compute_group_member_kinds(group.id, app));
         content.add_child(render_grouped_tabs_header(
             &group,
             member_count,
@@ -2690,6 +2832,7 @@ fn render_grouped_tab_container(
             hover_state.is_hovered(),
             is_being_renamed,
             rename_editor.as_ref(),
+            collapsed_member_kinds.as_deref(),
             app,
         ));
 
@@ -3362,6 +3505,7 @@ impl<'a> PaneProps<'a> {
         pane_group_id: EntityId,
         is_active_tab: bool,
         is_in_multi_selection: bool,
+        is_in_multi_tab_selection: bool,
         pane_row_state: PaneRowState,
         detail_hover_state: VerticalTabsDetailHoverState,
         display_granularity: VerticalTabsDisplayGranularity,
@@ -3412,7 +3556,9 @@ impl<'a> PaneProps<'a> {
             is_focused: pane_group.focused_pane_id(app) == pane_id,
             typed,
             is_being_dragged: pane.is_pane_being_dragged(app),
+            stack_position: PaneRowStackPosition::Standalone,
             is_in_multi_selection,
+            is_in_multi_tab_selection,
             pane_color: pane_row_state.pane_color,
             badge_mouse_states: pane_row_state.badge_mouse_states,
             detail_hover_state,
@@ -6172,6 +6318,7 @@ fn detail_pane_props<'a>(
         pane_group,
         pane_id,
         pane_group_id,
+        false,
         false,
         false,
         PaneRowState {

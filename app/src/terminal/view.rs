@@ -255,6 +255,7 @@ use crate::ai::blocklist::inline_action::code_diff_view::{CodeDiffView, FileDiff
 use crate::ai::blocklist::model::{
     AIBlockModel, AIBlockModelHelper, AIBlockModelImpl, AIBlockOutputStatus,
 };
+use crate::ai::blocklist::orchestration_topology::OrchestrationNavigationDirection;
 use crate::ai::blocklist::suggested_agent_mode_workflow_modal::SuggestedAgentModeWorkflowAndId;
 use crate::ai::blocklist::suggested_rule_modal::SuggestedRuleAndId;
 use crate::ai::blocklist::summarization_cancel_dialog::SummarizationCancelDialog;
@@ -4668,7 +4669,13 @@ impl TerminalView {
                     | RemoteServerManagerEvent::DiffStateSnapshotReceived { .. }
                     | RemoteServerManagerEvent::DiffStateMetadataUpdateReceived { .. }
                     | RemoteServerManagerEvent::DiffStateFileDeltaReceived { .. }
-                    | RemoteServerManagerEvent::GetBranchesResponse { .. } => {}
+                    | RemoteServerManagerEvent::GetBranchesResponse { .. }
+                    | RemoteServerManagerEvent::CommitChainResponse { .. }
+                    | RemoteServerManagerEvent::GitPushResponse { .. }
+                    | RemoteServerManagerEvent::CreatePrResponse { .. }
+                    | RemoteServerManagerEvent::GenerateCommitMessageResponse { .. }
+                    | RemoteServerManagerEvent::GetPrInfoResponse { .. }
+                    | RemoteServerManagerEvent::GetCommittedBranchFilesResponse { .. } => {}
                 }
             });
         }
@@ -7988,6 +7995,20 @@ impl TerminalView {
         ctx.notify();
     }
 
+    fn current_long_running_command_agent_interaction_state(
+        &self,
+    ) -> LongRunningCommandAgentInteractionState {
+        let model = self.model.lock();
+        let active_block = model.block_list().active_block();
+        if active_block.is_agent_in_control() {
+            LongRunningCommandAgentInteractionState::InControl
+        } else if active_block.is_agent_tagged_in() {
+            LongRunningCommandAgentInteractionState::TaggedIn
+        } else {
+            LongRunningCommandAgentInteractionState::NotInteracting
+        }
+    }
+
     fn emit_long_running_command_agent_interaction_state_changed(
         &self,
         agent_has_control: bool,
@@ -8008,10 +8029,6 @@ impl TerminalView {
                 LongRunningCommandAgentInteractionState::NotInteracting
             }
         };
-        log::info!(
-            "emit_long_running_command_agent_interaction_state_changed: \
-             agent_has_control={agent_has_control}, emitting state={state:?}"
-        );
         ctx.emit(Event::LongRunningCommandAgentInteractionStateChanged { state });
     }
 
@@ -8021,6 +8038,10 @@ impl TerminalView {
         state: LongRunningCommandAgentInteractionState,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.current_long_running_command_agent_interaction_state() == state {
+            return;
+        }
+        log::info!("Applying shared-session LRC interaction_state={state:?}");
         match state {
             LongRunningCommandAgentInteractionState::InControl => {
                 self.cli_subagent_controller.update(ctx, |controller, ctx| {
@@ -25962,6 +25983,8 @@ impl TypedActionView for TerminalView {
             | OpenChildAgentInNewTab { .. }
             | StopAgentConversation { .. }
             | KillAgentConversation { .. }
+            | CyclePreviousOrchestrationChildAgent
+            | CycleNextOrchestrationChildAgent
             | ToggleCLIAgentRichInput
             | ToggleSessionRecording => Empty,
         }
@@ -27109,6 +27132,22 @@ impl TypedActionView for TerminalView {
                 ctx.emit(Event::KillAgentConversation {
                     conversation_id: *conversation_id,
                 });
+            }
+            CyclePreviousOrchestrationChildAgent | CycleNextOrchestrationChildAgent => {
+                let direction = match action {
+                    CyclePreviousOrchestrationChildAgent => {
+                        OrchestrationNavigationDirection::Previous
+                    }
+                    CycleNextOrchestrationChildAgent => OrchestrationNavigationDirection::Next,
+                    _ => unreachable!("matched orchestration cycle action"),
+                };
+                if let Some(conversation_id) = self
+                    .agent_view_controller
+                    .as_ref(ctx)
+                    .adjacent_orchestration_conversation_id(direction, ctx)
+                {
+                    ctx.emit(Event::RevealChildAgent { conversation_id });
+                }
             }
             ToggleSessionRecording => {
                 self.pty_recorder.update(ctx, |recorder, ctx| {

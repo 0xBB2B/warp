@@ -42,7 +42,7 @@ pub use clipboard::Clipboard;
 pub use elements::Element;
 pub use event::Event;
 pub use pathfinder_color as color;
-use pathfinder_color::ColorU;
+// Keep `geometry` as its own public module alias alongside `color`.
 pub use pathfinder_geometry as geometry;
 pub use presenter::{
     AfterLayoutContext, EventContext, LayoutContext, PaintContext, Presenter, SizeConstraint,
@@ -54,6 +54,6 @@ pub use crate::core::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Gradient {
-    pub start: ColorU,
-    pub end: ColorU,
+    pub start: color::ColorU,
+    pub end: color::ColorU,
 }

@@ -954,7 +954,6 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     #[cfg(not(windows))]
     FeatureFlag::SshRemoteServer,
     FeatureFlag::RemoteCodebaseIndexing,
-    FeatureFlag::GroupedTabs,
     FeatureFlag::AsyncFind,
     FeatureFlag::GitGraph,
     FeatureFlag::GitGraphWrite,
@@ -967,6 +966,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
 pub const PREVIEW_FLAGS: &[FeatureFlag] = &[
     #[cfg(target_os = "macos")]
     FeatureFlag::DragTabsToWindows,
+    FeatureFlag::GroupedTabs,
 ];
 
 /// Features enabled for all release builds (i.e.: everything but WarpLocal).
@@ -1076,6 +1076,7 @@ impl FeatureFlag {
             GitGraphWrite => Some(
                 "Enables write operations (checkout, branch/tag management, merge, rebase, reset, cherry-pick, revert, push/pull, archive) from the Git Graph right-click menus.",
             ),
+            GroupedTabs => Some("Enables organizing tabs into named, collapsible groups."),
             _ => None,
         }
     }

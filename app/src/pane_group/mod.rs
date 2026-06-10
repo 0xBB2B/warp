@@ -3736,6 +3736,7 @@ impl PaneGroup {
                         CloudConversationData::CLIAgent(cli_conversation),
                         true,
                         RestoreConversationEntryBehavior::PreserveAgentViewState,
+                        false,
                         |_, _| {},
                         ctx,
                     );
@@ -5343,6 +5344,7 @@ impl PaneGroup {
                         CloudConversationData::CLIAgent(cli_conversation),
                         true,
                         RestoreConversationEntryBehavior::PreserveAgentViewState,
+                        false,
                         |_, _| {},
                         ctx,
                     );

@@ -68,7 +68,7 @@ use crate::menu::{Menu, MenuItem, MenuItemFields};
 use crate::settings::{GitSettings, GitSettingsChangedEvent};
 use crate::ui_components::buttons::icon_button;
 use crate::ui_components::item_highlight::ItemHighlightState;
-use crate::view_components::dropdown::{Dropdown, DropdownAction};
+use crate::view_components::dropdown::{Dropdown, DropdownAction, DropdownEvent};
 
 /// Number of commits loaded per page.
 const COMMIT_PAGE_SIZE: usize = 200;
@@ -327,6 +327,11 @@ pub(crate) struct GitGraphView {
     /// Scroll state of the branch overlay list (scrollable when there are many
     /// branches).
     branch_scroll_state: ClippedScrollStateHandle,
+    /// Max height of the branch overlay's list: 1/3 of the panel's height,
+    /// measured each time the overlay opens (see
+    /// [`Self::dropdown_max_height`]). Kept in state because render has no
+    /// `ctx` to measure the panel with.
+    branch_popup_max_height: f32,
     /// Loaded commits (wrapped in `Arc` for zero-copy move into the
     /// [`UniformList`] build closure).
     commits: Arc<Vec<CommitNode>>,
@@ -548,6 +553,17 @@ impl GitGraphView {
         repo_dropdown.update(ctx, |dropdown, ctx| {
             dropdown.set_main_axis_size(MainAxisSize::Min, ctx);
         });
+        // Cap the repo menu at 1/3 of the panel's height, re-measured on every
+        // expand (the panel may have been resized since the last open).
+        ctx.subscribe_to_view(&repo_dropdown, |me, _, event, ctx| {
+            if matches!(event, DropdownEvent::ToggleExpanded) {
+                if let Some(height) = me.dropdown_max_height(ctx) {
+                    me.repo_dropdown.update(ctx, |dropdown, ctx| {
+                        dropdown.set_menu_max_height(height, ctx);
+                    });
+                }
+            }
+        });
 
         // When the scan depth changes, re-discover repositories for the current
         // anchor (so the panel reflects a depth change made in settings
@@ -618,6 +634,9 @@ impl GitGraphView {
             branch_filter_query: String::new(),
             branch_mouse_states: Arc::new(Vec::new()),
             branch_scroll_state: ClippedScrollStateHandle::new(),
+            // Fallback before the first open ever measures the panel; replaced
+            // by 1/3 of the panel height when the overlay opens.
+            branch_popup_max_height: 280.,
             commits: Arc::new(Vec::new()),
             layout: Arc::new(empty_layout()),
             state: LoadState::NoRepo,
@@ -965,6 +984,16 @@ impl GitGraphView {
             .trim()
             .to_lowercase();
         ctx.notify();
+    }
+
+    /// Max list height for the header's dropdowns (repository menu + branch
+    /// overlay): 1/3 of the panel's height, read from the panel root's saved
+    /// position (one frame stale at worst). `None` until the panel has
+    /// rendered a frame — which can't happen from a dropdown click, since the
+    /// click needs a rendered panel; callers then keep their previous height.
+    fn dropdown_max_height(&self, ctx: &mut ViewContext<Self>) -> Option<f32> {
+        ctx.element_position_by_id(&self.position_id)
+            .map(|bounds| bounds.height() / 3.0)
     }
 
     /// Collapses the branch overlay, clears its filter, and returns focus to the
@@ -2156,7 +2185,7 @@ impl GitGraphView {
             .with_child(self.render_branch_filter_input(appearance))
             .with_child(
                 ConstrainedBox::new(scrollable)
-                    .with_max_height(280.)
+                    .with_max_height(self.branch_popup_max_height)
                     .finish(),
             )
             .finish();
@@ -4045,6 +4074,11 @@ impl TypedActionView for GitGraphView {
             GitGraphAction::ToggleBranchFilter => {
                 self.branch_filter_expanded = !self.branch_filter_expanded;
                 if self.branch_filter_expanded {
+                    // Re-measure the list's height cap on every open (the
+                    // panel may have been resized since the last open).
+                    if let Some(height) = self.dropdown_max_height(ctx) {
+                        self.branch_popup_max_height = height;
+                    }
                     // Focus the search box on open so the user can type to
                     // narrow the list immediately.
                     ctx.focus(&self.branch_filter_input);

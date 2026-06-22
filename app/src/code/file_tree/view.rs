@@ -117,6 +117,11 @@ pub enum FileTreeAction {
     OpenInFinder {
         id: FileTreeIdentifier,
     },
+    /// Open the directory in the user's configured external editor. Gated by
+    /// `FeatureFlag::OpenDirectoryInExternalEditor`.
+    OpenDirectoryInExternalEditor {
+        id: FileTreeIdentifier,
+    },
     Rename {
         id: FileTreeIdentifier,
     },
@@ -2512,6 +2517,7 @@ impl FileTreeView {
         &self,
         item: &FileTreeItem,
         id: &FileTreeIdentifier,
+        ctx: &AppContext,
     ) -> Vec<MenuItem<FileTreeAction>> {
         let is_remote = self.is_remote_item(id);
 
@@ -2587,6 +2593,22 @@ impl FileTreeView {
                     .with_on_select_action(FileTreeAction::OpenInFinder { id: id.clone() })
                     .into_item(),
             );
+
+            if matches!(item, FileTreeItem::DirectoryHeader { .. })
+                && FeatureFlag::OpenDirectoryInExternalEditor.is_enabled()
+            {
+                if let Some(label) =
+                    crate::util::file::external_editor::open_with_editor_menu_label(ctx)
+                {
+                    items.push(
+                        MenuItemFields::new(label)
+                            .with_on_select_action(FileTreeAction::OpenDirectoryInExternalEditor {
+                                id: id.clone(),
+                            })
+                            .into_item(),
+                    );
+                }
+            }
 
             // For now, the root repo is always the zero index. This may not always be the case if we allow
             // multiple repos in a project view, for instance. This disallows deletion/renaming of the root repo.
@@ -3264,7 +3286,7 @@ impl TypedActionView for FileTreeView {
                 self.context_menu_state = Some(ContextMenuState {
                     position: *position,
                 });
-                let menu_items = self.context_menu_items(item, id);
+                let menu_items = self.context_menu_items(item, id, ctx);
                 self.context_menu.update(ctx, move |menu, ctx| {
                     menu.set_items(menu_items, ctx);
                     ctx.notify();
@@ -3310,6 +3332,19 @@ impl TypedActionView for FileTreeView {
                         if let Some(item) = root_dir.items.get(id.index) {
                             let path = item.path().to_local_path_lossy();
                             ctx.open_file_path_in_explorer(&path);
+                        }
+                    }
+                }
+                self.context_menu_state.take();
+            }
+            FileTreeAction::OpenDirectoryInExternalEditor { id } => {
+                if !self.is_remote_item(id) {
+                    if let Some(root_dir) = self.root_directories.get(&id.root) {
+                        if let Some(item) = root_dir.items.get(id.index) {
+                            let path = item.path().to_local_path_lossy();
+                            crate::util::file::external_editor::open_directory_in_external_editor(
+                                path, ctx,
+                            );
                         }
                     }
                 }

@@ -269,6 +269,7 @@ integration_tests! {
     test_settings_error_banner_on_reload_with_invalid_toml,
     test_settings_error_banner_on_reload_with_invalid_value,
 
+    test_copy_selection_within_ai_block,
     #[ignore = "Affected by agent_view feature flag UI changes"]
     test_selection_first_to_last_through_ai_simple,
     #[ignore = "Affected by agent_view feature flag UI changes"]
@@ -333,6 +334,9 @@ integration_tests! {
     test_goto_line_clamps_out_of_range,
     test_code_editor_line_numbers_default_to_absolute,
     test_code_editor_relative_line_numbers_follow_cursor,
+
+    // AI document tests
+    test_copy_ai_document_as_markdown_from_overflow_menu,
 
     // Keyboard protocol tests
     test_keyboard_protocol_disabled_shift_enter,

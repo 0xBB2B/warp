@@ -426,6 +426,46 @@ impl CrossWindowTabDrag {
             .is_some_and(|d| d.source_placeholder_consumed)
     }
 
+    /// Returns the index of the detached-placeholder slot that the source
+    /// window's **horizontal** tab bar should collapse to zero width, or
+    /// `None` to keep every slot at full width.
+    ///
+    /// The placeholder is collapsed only while the dragged tab is actually
+    /// away from `window_id` — floating in the dedicated preview window, or
+    /// ghosted / handed off into another window. While the cursor is back
+    /// over this window's own tab bar (`reordering_in_source`) the placeholder
+    /// is the live drag slot, reordered in place exactly like an in-window
+    /// drag, so it must stay full width. Collapsing it there hides the drop
+    /// zone and, because a zero-width slot makes the adjacent-swap thresholds
+    /// in `Workspace::calculate_updated_tab_index` (`left.max_x` vs
+    /// `right.min_x`) overlap, makes the placeholder oscillate every frame —
+    /// the "fuzzy shake". The vertical tabs panel never collapses the
+    /// placeholder, which is why it does not exhibit this.
+    pub fn collapsed_source_placeholder_index(&self, window_id: WindowId) -> Option<usize> {
+        let drag = self.active_drag.as_ref()?;
+        if drag.source_window_id != window_id || drag.reordering_in_source {
+            return None;
+        }
+        let has_handoff = matches!(drag.phase, DragPhase::InsertedInTarget { .. });
+        if drag.has_dedicated_preview_window() || has_handoff {
+            self.source_placeholder_tab_index()
+        } else {
+            None
+        }
+    }
+
+    /// Test-only override of the in-progress drag's `reordering_in_source`
+    /// flag, which is otherwise only set from within `on_drag` once the cursor
+    /// re-enters the source window's tab bar. Lets unit tests exercise
+    /// [`Self::collapsed_source_placeholder_index`] without driving a full
+    /// multi-window drag.
+    #[cfg(test)]
+    pub(crate) fn set_reordering_in_source_for_test(&mut self, reordering_in_source: bool) {
+        if let Some(drag) = self.active_drag.as_mut() {
+            drag.reordering_in_source = reordering_in_source;
+        }
+    }
+
     pub fn has_dedicated_preview_window(&self) -> bool {
         self.active_drag
             .as_ref()
@@ -1359,28 +1399,34 @@ impl CrossWindowTabDrag {
             return DropResult::ClosePreviewOnly { preview_window_id };
         }
 
-        if let Some(ws) = WorkspaceRegistry::as_ref(ctx).get(preview_window_id, ctx) {
-            ws.update(ctx, |ws, ctx| {
-                ws.set_is_tab_drag_preview(false);
-                // The preview's `suppress_detach_panes_on_window_close` flag
-                // is latched to `true` by every forward handoff out of the
-                // preview (`prepare_for_transferred_tab_attach` in
-                // `execute_handoff_multi_tab_to_other`) and is *not* cleared
-                // by `reverse_handoff` for the multi-tab case (only
-                // `is_tab_drag_preview` is restored there). Promoting the
-                // preview to a permanent window without clearing this flag
-                // would leave a normal-looking window that silently skips
-                // pane-detach on its next user-initiated close.
-                ws.set_suppress_detach_panes_on_window_close(false);
-                ws.sync_window_button_visibility(ctx);
-                ws.update_titlebar_height(ctx);
-                ctx.notify();
-            });
-        } else {
+        let Some(ws) = WorkspaceRegistry::as_ref(ctx).get(preview_window_id, ctx) else {
+            // The preview window's workspace is already gone, so there is no
+            // window to promote and the dragged pane group no longer lives in
+            // a preview we control. Falling through would return
+            // `RemoveSourceTab` / `CloseSourceWindow` keyed on a now-stale
+            // `source_tab_index`, tearing out a bystander tab or panicking in
+            // `remove_tab`. Bail without touching the source.
             log::warn!(
-                "tab_drag: finalize_preview_as_new_window no workspace for preview_wid={preview_window_id}"
+                "tab_drag: finalize_preview_as_new_window no workspace for preview_wid={preview_window_id} -> NoOp"
             );
-        }
+            return DropResult::NoOp;
+        };
+        ws.update(ctx, |ws, ctx| {
+            ws.set_is_tab_drag_preview(false);
+            // The preview's `suppress_detach_panes_on_window_close` flag
+            // is latched to `true` by every forward handoff out of the
+            // preview (`prepare_for_transferred_tab_attach` in
+            // `execute_handoff_multi_tab_to_other`) and is *not* cleared
+            // by `reverse_handoff` for the multi-tab case (only
+            // `is_tab_drag_preview` is restored there). Promoting the
+            // preview to a permanent window without clearing this flag
+            // would leave a normal-looking window that silently skips
+            // pane-detach on its next user-initiated close.
+            ws.set_suppress_detach_panes_on_window_close(false);
+            ws.sync_window_button_visibility(ctx);
+            ws.update_titlebar_height(ctx);
+            ctx.notify();
+        });
         ctx.windows().show_window_and_focus_app(preview_window_id);
         Self::deferred_focus(preview_window_id, ctx);
 
@@ -1970,3 +2016,7 @@ fn compute_insertion_index_for_window(
         0
     }
 }
+
+#[cfg(test)]
+#[path = "cross_window_tab_drag_tests.rs"]
+mod tests;

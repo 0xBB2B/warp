@@ -906,11 +906,34 @@ impl TuiInputView {
     pub(crate) fn exit_shell_mode(&mut self, ctx: &mut ViewContext<Self>) {
         let is_input_buffer_empty = self.plain_text(ctx).is_empty();
         self.input_mode.clone().update(ctx, |input_mode, ctx| {
-            input_mode.set_input_config(AI_LOCKED_CONFIG, is_input_buffer_empty, None, ctx);
+            input_mode.set_input_config(
+                AI_LOCKED_CONFIG,
+                is_input_buffer_empty,
+                Some(InputTypeAutoDetectionSource::ManualToggle),
+                ctx,
+            );
         });
     }
 
-    fn reset_to_default_agent_mode(&mut self, ctx: &mut ViewContext<Self>) {
+    /// Locks the input to Agent while a CLI subagent owns terminal control. The
+    /// `AgentTerminalControl` autodetection source marks the lock as
+    /// agent-installed so the post-agent reset can distinguish it from a
+    /// user-forced `ManualToggle` lock.
+    pub(crate) fn lock_for_agent_control(&mut self, ctx: &mut ViewContext<Self>) {
+        let is_input_buffer_empty = self.plain_text(ctx).is_empty();
+        self.input_mode.clone().update(ctx, |input_mode, ctx| {
+            input_mode.set_input_config(
+                AI_LOCKED_CONFIG,
+                is_input_buffer_empty,
+                Some(InputTypeAutoDetectionSource::AgentTerminalControl),
+                ctx,
+            );
+        });
+    }
+
+    /// Restores the setting-derived agent-first mode while preserving the
+    /// current input buffer.
+    pub(crate) fn reset_to_default_agent_mode(&mut self, ctx: &mut ViewContext<Self>) {
         let is_autodetection_enabled = self
             .input_mode
             .as_ref(ctx)
@@ -922,6 +945,20 @@ impl TuiInputView {
                 input_mode.set_input_config(AI_LOCKED_CONFIG, true, None, ctx);
             }
         });
+    }
+
+    /// Restores the setting-derived mode only when the current AI lock was
+    /// installed for agent terminal control. Reuses the shared model's
+    /// `last_ai_autodetection_source` rather than a parallel bool: an explicit
+    /// user lock carries a `ManualToggle` (or `ShellPrefix`) source, so it is
+    /// left untouched.
+    pub(crate) fn reset_after_agent_control(&mut self, ctx: &mut ViewContext<Self>) {
+        let is_agent_controlled = self.input_mode.as_ref(ctx).last_ai_autodetection_source()
+            == Some(InputTypeAutoDetectionSource::AgentTerminalControl);
+        if !is_agent_controlled {
+            return;
+        }
+        self.reset_to_default_agent_mode(ctx);
     }
 
     // ── Submit ────────────────────────────────────────────────────────────────

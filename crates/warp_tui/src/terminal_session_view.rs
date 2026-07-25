@@ -10,12 +10,12 @@ use async_channel::Sender;
 use instant::Instant;
 use parking_lot::FairMutex;
 use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
-use warp::settings::{AISettings, AISettingsChangedEvent};
+use warp::settings::{AISettings, AISettingsChangedEvent, TuiTheme, TuiThemeSettings};
 use warp::tui_export::{
     AIAgentActionId, AIAgentActionResultType, AIAgentContext, AIAgentExchangeId,
     AIAgentPtyWriteMode, AIConversation, AIConversationId, AcceptSlashCommandOrSavedPrompt,
     ActiveSession, ActiveSessionEvent, AgentConversationEntryId, AgentConversationListEntryState,
-    AgentConversationsModel, AgentInteractionMetadata, AgentViewEntryOrigin, BlockId,
+    AgentConversationsModel, AgentInteractionMetadata, AgentViewEntryOrigin, Appearance, BlockId,
     BlocklistAIActionEvent, BlocklistAIActionModel, BlocklistAIContextModel, BlocklistAIController,
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIInputModel, CLISubagentController,
     CLISubagentEvent, CLISubagentTarget, COMMAND_REGISTRY, CancellationReason, ChangelogModel,
@@ -95,6 +95,7 @@ use crate::session_registry::TuiSessions;
 use crate::skills_menu::{TuiSkillMenuEvent, TuiSkillMenuModel};
 use crate::slash_commands::TuiSlashCommandModel;
 use crate::tab_bar::{TuiTabBarConfig, TuiTabBarEvent, TuiTabBarView};
+use crate::terminal_background::probed_colors;
 use crate::terminal_content_element::TuiTerminalContentElement;
 use crate::terminal_use::{
     TerminalUseInterruptAction, TuiInputTarget, hide_agent_requested_command_from_top_level,
@@ -199,6 +200,7 @@ const SWITCH_LOADING_HINT: &str = "Another conversation is already loading.";
 const SWITCH_UNAVAILABLE_HINT: &str = "That conversation is no longer available.";
 const LOADING_CONVERSATION_HINT: &str = "Loading conversation…";
 const MODEL_PERSISTENCE_FAILED_HINT: &str = "Could not save the selected model.";
+const THEME_INVALID_ARGUMENT_HINT: &str = "Theme must be auto, light, or dark.";
 
 /// Footer label shown while the input is in `!` shell mode. The how-to-exit
 /// guidance lives in the input's placeholder ghost text, so the footer only
@@ -210,6 +212,7 @@ const LOG_BUNDLE_FAILED_HINT: &str = "Failed to create log bundle (check logs)";
 const NLD_ENABLED_HINT: &str = "Natural language detection enabled.";
 const NLD_DISABLED_HINT: &str = "Natural language detection disabled.";
 const NLD_PERSISTENCE_FAILED_HINT: &str = "Could not save the natural language detection setting.";
+const THEME_PERSISTENCE_FAILED_HINT: &str = "Could not save the theme setting.";
 const ZERO_STATE_ASCII_INITIAL_LOAD_FAILED_HINT: &str =
     "Could not load custom ASCII art. Using the built-in Warp logo.";
 const ZERO_STATE_ASCII_RELOAD_FAILED_HINT: &str =
@@ -3481,6 +3484,9 @@ impl TuiTerminalSessionView {
             SlashCommandKind::NaturalLanguageDetection => {
                 self.toggle_nld(command.name, ctx);
             }
+            SlashCommandKind::Theme => {
+                self.toggle_theme(command.name, argument.map(String::as_str), ctx);
+            }
             SlashCommandKind::CloudAgent
             | SlashCommandKind::AddMcp
             | SlashCommandKind::CreateEnvironment
@@ -3554,6 +3560,48 @@ impl TuiTerminalSessionView {
                     log::warn!("Failed to disable TUI natural language detection: {error}");
                 }
                 self.show_transient_hint(NLD_PERSISTENCE_FAILED_HINT.to_owned(), ctx);
+            }
+        }
+        record_static_slash_command_accepted(command_name, true, ctx);
+    }
+
+    fn toggle_theme(
+        &mut self,
+        command_name: &'static str,
+        argument: Option<&str>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.input_view.update(ctx, |input, ctx| input.clear(ctx));
+        let Some(theme) = argument.and_then(|argument| argument.trim().parse::<TuiTheme>().ok())
+        else {
+            self.show_transient_hint(THEME_INVALID_ARGUMENT_HINT.to_owned(), ctx);
+            record_static_slash_command_accepted(command_name, true, ctx);
+            return;
+        };
+        let result = TuiThemeSettings::handle(ctx)
+            .update(ctx, |settings, ctx| settings.theme.set_value(theme, ctx));
+        match result {
+            Ok(()) => {
+                Appearance::handle(ctx).update(ctx, |appearance, ctx| {
+                    appearance.set_theme(
+                        theme.resolve_for_background(probed_colors().background_luminance()),
+                        ctx,
+                    );
+                });
+                let hint = match theme {
+                    TuiTheme::Auto => format!(
+                        "Theme set to auto mode (currently {}).",
+                        TuiTheme::from(Appearance::as_ref(ctx).theme()).display_name()
+                    ),
+                    TuiTheme::Light | TuiTheme::Dark => {
+                        format!("Theme set to {} mode.", theme.display_name())
+                    }
+                };
+                self.show_success_hint(hint, ctx);
+            }
+            Err(error) => {
+                log::warn!("Failed to save TUI theme selection: {error}");
+                self.show_transient_hint(THEME_PERSISTENCE_FAILED_HINT.to_owned(), ctx);
             }
         }
         record_static_slash_command_accepted(command_name, true, ctx);

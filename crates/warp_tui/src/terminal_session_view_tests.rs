@@ -5,7 +5,9 @@ use std::time::Duration;
 use instant::Instant;
 use tempfile::TempDir;
 use warp::appearance::Appearance;
-use warp::settings::{AISettings, TuiUsageDisplayMode, TuiZeroStateObject};
+use warp::settings::{
+    AISettings, TuiTheme, TuiThemeSettings, TuiUsageDisplayMode, TuiZeroStateObject,
+};
 use warp::terminal::model::ansi::{Handler, InputBufferValue, Mode};
 use warp::tui_export::{
     AIAgentActionId, AIAgentExchangeId, AIConversationAutoexecuteMode, AIConversationId,
@@ -255,6 +257,77 @@ fn zero_state_reload_failure_renders_as_an_error_footer_hint() {
                     .expect("error text style should have a foreground")
             );
         });
+    });
+}
+
+#[test]
+fn theme_slash_command_accepts_direct_selection_and_rejects_invalid_values() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        let light = "light".to_owned();
+
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&light), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Light
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Light
+            );
+        });
+        let dark = "dark".to_owned();
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&dark), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Dark
+            );
+        });
+
+        let auto = "auto".to_owned();
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&auto), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+
+        let invalid = "sepia".to_owned();
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, Some(&invalid), ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+        assert_eq!(
+            view.read(&app, |view, _| {
+                view.transient_hint
+                    .current()
+                    .map(|(text, _)| text.to_owned())
+            }),
+            Some(super::THEME_INVALID_ARGUMENT_HINT.to_owned())
+        );
     });
 }
 
@@ -546,6 +619,47 @@ fn auto_approve_slash_command_toggles_selected_conversation_off_on_off() {
                 ))
             );
         });
+    });
+}
+
+#[test]
+fn theme_slash_command_rejects_a_missing_argument() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+
+        view.update(&mut app, |view, ctx| {
+            view.execute_tui_slash_command(&slash_commands::THEME, None, ctx);
+        });
+        app.read(|ctx| {
+            assert_eq!(
+                TuiTheme::from(Appearance::as_ref(ctx).theme()),
+                TuiTheme::Dark
+            );
+            assert_eq!(
+                TuiThemeSettings::as_ref(ctx).selected_theme(),
+                TuiTheme::Auto
+            );
+        });
+        assert_eq!(
+            view.read(&app, |view, _| {
+                view.transient_hint
+                    .current()
+                    .map(|(text, _)| text.to_owned())
+            }),
+            Some(super::THEME_INVALID_ARGUMENT_HINT.to_owned())
+        );
     });
 }
 

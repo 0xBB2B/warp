@@ -148,11 +148,10 @@ fn activate_global_mcp_servers(ctx: &mut AppContext) {
     });
 }
 
-/// Logs out the current TUI user and starts a fresh device-authorization flow.
+/// Logs out the current TUI user and sends them to Warp web's logged-out flow.
 pub fn log_out_tui(ctx: &mut AppContext) {
-    auth::log_out(ctx);
+    auth::log_out_and_open_web(ctx);
     set_logged_out_phase(ctx);
-    authorize_device(ctx);
 }
 
 fn set_logged_out_phase(ctx: &mut AppContext) {

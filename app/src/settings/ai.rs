@@ -666,6 +666,115 @@ settings::macros::implement_setting_for_enum!(
     toml_path: "agents.usage_display_mode",
     description: "Which unit the usage entry displays in Warp Agent CLI: credits or provider cost.",
 );
+/// One configurable item in the Warp Agent CLI statusline.
+#[derive(
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Copy,
+    Clone,
+    Hash,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(
+    description = "A configurable item in the Warp Agent CLI statusline.",
+    rename_all = "snake_case"
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiStatuslineItem {
+    AutoApprove,
+    AutoQueue,
+    Model,
+    WorkingDirectory,
+    GitBranch,
+    GitDiffStatus,
+    CreditUsage,
+    ContextWindowUsage,
+}
+
+impl TuiStatuslineItem {
+    pub const ALL: [Self; 8] = [
+        Self::AutoApprove,
+        Self::AutoQueue,
+        Self::Model,
+        Self::WorkingDirectory,
+        Self::GitBranch,
+        Self::GitDiffStatus,
+        Self::CreditUsage,
+        Self::ContextWindowUsage,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AutoApprove => "Auto-approve indicator",
+            Self::AutoQueue => "Auto-queue next prompt indicator",
+            Self::Model => "Model",
+            Self::WorkingDirectory => "Working directory",
+            Self::GitBranch => "Git branch",
+            Self::GitDiffStatus => "Git diff status",
+            Self::CreditUsage => "Credit usage",
+            Self::ContextWindowUsage => "Context window usage",
+        }
+    }
+}
+
+/// Ordered and enabled items in the Warp Agent CLI statusline.
+#[derive(
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Clone,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+pub struct TuiStatuslineConfig {
+    pub order: Vec<TuiStatuslineItem>,
+    pub enabled: Vec<TuiStatuslineItem>,
+}
+
+impl Default for TuiStatuslineConfig {
+    fn default() -> Self {
+        Self {
+            order: TuiStatuslineItem::ALL.to_vec(),
+            enabled: vec![
+                TuiStatuslineItem::Model,
+                TuiStatuslineItem::WorkingDirectory,
+                TuiStatuslineItem::GitBranch,
+                TuiStatuslineItem::GitDiffStatus,
+            ],
+        }
+    }
+}
+
+impl TuiStatuslineConfig {
+    /// Returns a complete, duplicate-free catalog and a valid enabled subset.
+    pub fn normalized(&self) -> Self {
+        let mut order = Vec::with_capacity(TuiStatuslineItem::ALL.len());
+        for item in self.order.iter().copied().chain(TuiStatuslineItem::ALL) {
+            if !order.contains(&item) {
+                order.push(item);
+            }
+        }
+
+        let mut enabled = Vec::with_capacity(self.enabled.len());
+        for item in self.enabled.iter().copied() {
+            if order.contains(&item) && !enabled.contains(&item) {
+                enabled.push(item);
+            }
+        }
+
+        Self { order, enabled }
+    }
+
+    pub fn is_enabled(&self, item: TuiStatuslineItem) -> bool {
+        self.enabled.contains(&item)
+    }
+}
 
 impl TuiUsageDisplayMode {
     /// The other unit — clicking the usage entry flips to this.
@@ -1324,6 +1433,18 @@ define_settings_group!(AISettings, settings: [
     //
     // TUI-only and file-backed so the choice persists across TUI sessions.
     usage_display_mode: TuiUsageDisplayMode,
+    // Ordered visibility configuration for the TUI's bottom statusline.
+    // TUI-only and local so separate devices can use different terminal layouts.
+    tui_statusline: TuiStatusline {
+        type: TuiStatuslineConfig,
+        default: TuiStatuslineConfig::default(),
+        supported_platforms: SupportedPlatforms::ALL,
+        sync_to_cloud: SyncToCloud::Never,
+        surface: settings::SettingSurfaces::TUI,
+        private: false,
+        toml_path: "agents.statusline",
+        description: "Controls the order and visibility of Warp Agent CLI statusline items.",
+    },
     // Whether or not the profile-level command autoexecution speedbump has been shown.
     //
     // Not a user-visible setting - we model it as a setting so we can track how often

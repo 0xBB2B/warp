@@ -157,8 +157,6 @@ use crate::ai::agent_conversations_model::{
 use crate::ai::ambient_agents::telemetry::HandoffEntryPoint;
 use crate::ai::attachment_utils::MAX_ATTACHMENT_SIZE_BYTES;
 use crate::ai::block_context::BlockContext;
-#[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
-use crate::ai::blocklist::agent_view::agent_input_footer::sort_environments_by_recency;
 use crate::ai::blocklist::agent_view::shortcuts::AgentShortcutViewModel;
 use crate::ai::blocklist::agent_view::{
     AgentInputFooter, AgentInputFooterEvent, AgentViewController, AgentViewEntryOrigin,
@@ -187,6 +185,8 @@ use crate::ai::blocklist::{
 };
 use crate::ai::cloud_agent_settings::CloudAgentSettings;
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
+#[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
+use crate::ai::cloud_environments::sort_environments_by_recency;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::conversation_export::export_conversation_markdown;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};

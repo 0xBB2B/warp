@@ -1,12 +1,12 @@
 //! Integration-test helpers for the Git Graph panel.
 
 use warpui::integration::{AssertionCallback, TestStep};
-use warpui::{async_assert, App, TypedActionView, ViewHandle, WindowId};
+use warpui::{App, TypedActionView, ViewHandle, WindowId, async_assert};
 
 use crate::integration_testing::view_getters::workspace_view;
+use crate::workspace::view::git_graph::GitGraphView;
 use crate::workspace::view::git_graph::ops::GitWriteOp;
 use crate::workspace::view::git_graph::view::GitGraphAction;
-use crate::workspace::view::git_graph::GitGraphView;
 
 /// Resolves the [`GitGraphView`] handle (workspace → left panel → git graph).
 fn git_graph_view(app: &mut App, window_id: WindowId) -> ViewHandle<GitGraphView> {

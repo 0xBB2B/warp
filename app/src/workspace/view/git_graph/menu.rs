@@ -6,7 +6,7 @@
 //! [`Menu`]: crate::menu::Menu
 
 use super::data::CommitNode;
-use super::ops::{split_remote_ref, GitWriteOp};
+use super::ops::{GitWriteOp, split_remote_ref};
 use super::view::GitGraphAction;
 use crate::menu::{MenuItem, MenuItemFields};
 

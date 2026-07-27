@@ -9,8 +9,8 @@ use warpui::ui_components::switch::SwitchStateHandle;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
 use super::settings_page::{
-    add_setting, render_body_item, render_dropdown_item, MatchData, PageType, SettingsPageEvent,
-    SettingsPageMeta, SettingsPageViewHandle, SettingsWidget,
+    MatchData, PageType, SettingsPageEvent, SettingsPageMeta, SettingsPageViewHandle,
+    SettingsWidget, add_setting, render_body_item, render_dropdown_item,
 };
 use super::{LocalOnlyIconState, SettingsSection, ToggleState};
 use crate::appearance::Appearance;

@@ -26,7 +26,7 @@ use crate::appearance::Appearance;
 use crate::code::diff_viewer::{DiffViewer, DisplayMode};
 use crate::code::editor::view::{CodeEditorEvent, CodeEditorRenderOptions, CodeEditorView};
 use crate::code::inline_diff::InlineDiffView;
-use crate::code_review::diff_state::{convert_hunks_to_diff_deltas, DiffHunk};
+use crate::code_review::diff_state::{DiffHunk, convert_hunks_to_diff_deltas};
 use crate::editor::InteractionState;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::pane_group::focus_state::PaneFocusHandle;
@@ -291,9 +291,11 @@ impl BackingView for CommitDiffView {
             .focus_handle
             .as_ref()
             .is_some_and(|h| h.is_maximized(ctx));
-        vec![MenuItemFields::toggle_pane_action(is_maximized)
-            .with_on_select_action(CommitDiffMenuAction::ToggleMaximized)
-            .into_item()]
+        vec![
+            MenuItemFields::toggle_pane_action(is_maximized)
+                .with_on_select_action(CommitDiffMenuAction::ToggleMaximized)
+                .into_item(),
+        ]
     }
 
     fn render_header_content(

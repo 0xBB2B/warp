@@ -18,47 +18,47 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_channel::Sender;
 use pathfinder_color::ColorU;
 #[cfg(feature = "local_fs")]
+use repo_metadata::Repository;
+#[cfg(feature = "local_fs")]
 use repo_metadata::repositories::{DetectedRepositories, RepoDetectionSource};
 #[cfg(feature = "local_fs")]
 use repo_metadata::repository::SubscriberId;
-#[cfg(feature = "local_fs")]
-use repo_metadata::Repository;
+use warp_core::ui::Icon;
 use warp_core::ui::color::pick_foreground_color;
 use warp_core::ui::theme::color::internal_colors;
-use warp_core::ui::Icon;
+#[cfg(feature = "local_fs")]
+use warpui::ModelHandle;
 use warpui::clipboard::ClipboardContent;
 use warpui::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
 use warpui::elements::{
-    resizable_state_handle, Align, Border, ChildAnchor, ChildView, ClippedScrollStateHandle,
-    ClippedScrollable, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss,
-    DragBarSide, Element, Empty, Expanded, Fill, Flex, Highlight, Hoverable, MainAxisAlignment,
-    MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement,
-    ParentOffsetBounds, PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
+    Align, Border, ChildAnchor, ChildView, ClippedScrollStateHandle, ClippedScrollable,
+    ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Dismiss, DragBarSide, Element,
+    Empty, Expanded, Fill, Flex, Highlight, Hoverable, MainAxisAlignment, MainAxisSize,
+    MouseStateHandle, OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds,
+    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollStateHandle, Scrollable, ScrollableElement,
     ScrollbarWidth, SelectableArea, SelectionHandle, Shrinkable, Stack, Text, UniformList,
-    UniformListState,
+    UniformListState, resizable_state_handle,
 };
 use warpui::fonts::{Properties, Weight};
-use warpui::geometry::vector::{vec2f, Vector2F};
-use warpui::keymap::macros::id;
+use warpui::geometry::vector::{Vector2F, vec2f};
 use warpui::keymap::FixedBinding;
+use warpui::keymap::macros::id;
 use warpui::platform::SaveFilePickerConfiguration;
 use warpui::scene::DropShadow;
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::units::Pixels;
-#[cfg(feature = "local_fs")]
-use warpui::ModelHandle;
 use warpui::{AppContext, Entity, SingletonEntity, TypedActionView, View, ViewContext, ViewHandle};
 
 #[cfg(feature = "local_fs")]
 use super::auto_refresh;
 use super::data::{BranchRef, ChangedFile, CommitDetail, CommitNode, RefKind, RefLabel};
-use super::layout::{build_layout, GraphLayout, GraphRow};
-use super::menu::{build_menu, MenuKind, PromptKind, DEFAULT_PUSH_REMOTE};
-use super::ops::{archive_format_from_path, GitWriteOp, ResetMode};
+use super::layout::{GraphLayout, GraphRow, build_layout};
+use super::menu::{DEFAULT_PUSH_REMOTE, MenuKind, PromptKind, build_menu};
+use super::ops::{GitWriteOp, ResetMode, archive_format_from_path};
 use super::row_canvas::GitGraphRowCanvas;
 use crate::appearance::Appearance;
 use crate::code::editor::{add_color, remove_color};

@@ -314,7 +314,7 @@ fn test_editor_try_from_unsupported_editors() {
 
 #[test]
 fn menu_label_external_editor_uses_editor_display_name() {
-    use super::{open_with_editor_menu_label_for_choice, Editor, EditorChoice};
+    use super::{Editor, EditorChoice, open_with_editor_menu_label_for_choice};
 
     let label = open_with_editor_menu_label_for_choice(
         EditorChoice::ExternalEditor(Editor::VSCode),
@@ -330,7 +330,7 @@ fn menu_label_external_editor_uses_editor_display_name() {
 
 #[test]
 fn menu_label_system_default_falls_back_to_generic_label() {
-    use super::{open_with_editor_menu_label_for_choice, EditorChoice};
+    use super::{EditorChoice, open_with_editor_menu_label_for_choice};
 
     let label = open_with_editor_menu_label_for_choice(EditorChoice::SystemDefault, false);
     assert_eq!(label.as_deref(), Some("Open in editor"));
@@ -338,7 +338,7 @@ fn menu_label_system_default_falls_back_to_generic_label() {
 
 #[test]
 fn menu_label_warp_choice_yields_no_item() {
-    use super::{open_with_editor_menu_label_for_choice, EditorChoice};
+    use super::{EditorChoice, open_with_editor_menu_label_for_choice};
 
     let label = open_with_editor_menu_label_for_choice(EditorChoice::Warp, false);
     assert_eq!(label, None);
@@ -346,7 +346,7 @@ fn menu_label_warp_choice_yields_no_item() {
 
 #[test]
 fn menu_label_env_editor_requires_editor_var_to_be_set() {
-    use super::{open_with_editor_menu_label_for_choice, EditorChoice};
+    use super::{EditorChoice, open_with_editor_menu_label_for_choice};
 
     let label_unset = open_with_editor_menu_label_for_choice(EditorChoice::EnvEditor, false);
     assert_eq!(label_unset, None);

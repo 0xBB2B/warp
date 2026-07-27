@@ -14,8 +14,8 @@ use warpui::async_assert;
 use warpui::integration::{AssertionCallback, TestStep};
 
 use super::new_builder;
-use crate::util::write_all_rc_files_for_test;
 use crate::Builder;
+use crate::util::write_all_rc_files_for_test;
 
 fn run_git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")

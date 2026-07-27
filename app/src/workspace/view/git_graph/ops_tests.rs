@@ -281,25 +281,31 @@ fn stash_ops_build_expected_args() {
 
 #[test]
 fn stash_ops_confirm_except_branch() {
-    assert!(GitWriteOp::StashApply {
-        selector: "stash@{0}".into()
-    }
-    .confirm_message()
-    .is_some());
+    assert!(
+        GitWriteOp::StashApply {
+            selector: "stash@{0}".into()
+        }
+        .confirm_message()
+        .is_some()
+    );
     // Pop warns it removes the stash.
-    assert!(GitWriteOp::StashPop {
-        selector: "stash@{0}".into()
-    }
-    .confirm_message()
-    .unwrap()
-    .contains("removed"));
+    assert!(
+        GitWriteOp::StashPop {
+            selector: "stash@{0}".into()
+        }
+        .confirm_message()
+        .unwrap()
+        .contains("removed")
+    );
     // Drop warns it cannot be undone.
-    assert!(GitWriteOp::StashDrop {
-        selector: "stash@{0}".into()
-    }
-    .confirm_message()
-    .unwrap()
-    .contains("cannot be undone"));
+    assert!(
+        GitWriteOp::StashDrop {
+            selector: "stash@{0}".into()
+        }
+        .confirm_message()
+        .unwrap()
+        .contains("cannot be undone")
+    );
     // Create-branch gates through its name dialog, so no confirm.
     assert_eq!(
         GitWriteOp::StashBranch {
@@ -407,12 +413,14 @@ fn split_remote_ref_splits_on_first_slash() {
 #[test]
 fn confirm_message_present_for_destructive_absent_for_input_ops() {
     // Text-input ops gate themselves through their dialog.
-    assert!(GitWriteOp::CreateBranch {
-        hash: "h".into(),
-        name: "b".into()
-    }
-    .confirm_message()
-    .is_none());
+    assert!(
+        GitWriteOp::CreateBranch {
+            hash: "h".into(),
+            name: "b".into()
+        }
+        .confirm_message()
+        .is_none()
+    );
     // Hard reset warns about losing uncommitted work.
     let msg = GitWriteOp::Reset {
         hash: "abcdef0".into(),
@@ -422,11 +430,13 @@ fn confirm_message_present_for_destructive_absent_for_input_ops() {
     .expect("hard reset must confirm");
     assert!(msg.contains("lost"));
     // Remote deletion warns it cannot be undone.
-    assert!(GitWriteOp::DeleteRemoteBranch {
-        remote: "origin".into(),
-        branch: "x".into()
-    }
-    .confirm_message()
-    .unwrap()
-    .contains("cannot be undone"));
+    assert!(
+        GitWriteOp::DeleteRemoteBranch {
+            remote: "origin".into(),
+            branch: "x".into()
+        }
+        .confirm_message()
+        .unwrap()
+        .contains("cannot be undone")
+    );
 }

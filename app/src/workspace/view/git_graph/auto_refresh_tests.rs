@@ -114,7 +114,7 @@ mod capture {
 }
 
 mod detail_refresh {
-    use super::super::{detail_refresh_after_reload, DetailRefresh};
+    use super::super::{DetailRefresh, detail_refresh_after_reload};
 
     #[test]
     fn uncommitted_detail_refreshes_in_place_while_the_tree_is_dirty() {
@@ -160,7 +160,7 @@ mod detail_refresh {
 mod throttle {
     use std::time::Duration;
 
-    use super::super::{throttle_signal, ThrottleDecision};
+    use super::super::{ThrottleDecision, throttle_signal};
 
     const INTERVAL: Duration = Duration::from_secs(3);
 
@@ -223,8 +223,8 @@ mod throttle {
 }
 
 mod reload_predicate {
-    use repo_metadata::watcher::TargetFile;
     use repo_metadata::RepositoryUpdate;
+    use repo_metadata::watcher::TargetFile;
 
     use super::super::subscription::should_reload;
 

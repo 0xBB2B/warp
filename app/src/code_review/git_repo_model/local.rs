@@ -12,7 +12,7 @@ use warpui::{Entity, ModelContext, ModelHandle};
 
 use super::{GitRepoStatusEvent, GitStatusMetadata};
 use crate::code_review::diff_state::{
-    diff_metadata_against_head, file_statuses_against_head, GitFileStatus,
+    GitFileStatus, diff_metadata_against_head, file_statuses_against_head,
 };
 use crate::context_chips::display_chip::GitBranchTrackingStatus;
 use crate::throttle::throttle;

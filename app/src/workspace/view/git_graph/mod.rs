@@ -30,4 +30,4 @@ pub(crate) mod view;
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use view::GitGraphEvent;
-pub(crate) use view::{init, GitGraphView};
+pub(crate) use view::{GitGraphView, init};

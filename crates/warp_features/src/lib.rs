@@ -924,6 +924,11 @@ pub enum FeatureFlag {
     /// Gates the account-first onboarding flow, including the reordered
     /// pre-auth slides and post-auth account offer.
     AccountFirstOnboarding,
+
+    /// Accepts well-known non-UUID managed MCP ids (e.g. `"linear"`) as
+    /// `warp_id` values in MCP configs and as bare identifiers in CLI
+    /// `--mcp` arguments, resolved server-side at run setup.
+    WellKnownMcpIds,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -999,6 +1004,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::McpJsonTreeView,
     FeatureFlag::GeminiEnterprise,
     FeatureFlag::BoxDrawingGlyphs,
+    FeatureFlag::WellKnownMcpIds,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).

@@ -671,6 +671,12 @@ pub(crate) enum TuiTerminalSessionAction {
     PasteFromClipboard,
     /// Start recording voice input from the session composer.
     StartVoiceInput,
+    /// Left-click on the inline menu at absolute snapshot index `index`:
+    /// selects and accepts that row.
+    InlineMenuMouseAcceptRow(usize),
+    /// Scroll-wheel over the inline menu: scrolls the viewport by `delta` rows
+    /// without changing the selection.
+    InlineMenuMouseScrollBy(isize),
     /// Start or stop voice input from the configured statusline control.
     ToggleVoiceInput,
 }
@@ -3608,6 +3614,29 @@ impl TuiTerminalSessionView {
         self.handle_submitted(text, linked_workflow_data, ctx);
     }
 
+    /// Handles a mouse-click accept on the inline menu: selects the row at
+    /// `index` in the active menu and dispatches the result through the same
+    /// path as keyboard-based acceptance.
+    fn handle_inline_menu_mouse_accept(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let mode = self.suggestions_mode.as_ref(ctx).mode();
+        let Some(menu) = active_inline_menu(&self.inline_menus, mode, ctx) else {
+            return;
+        };
+        // Guard: only fire accept when select_by_snapshot_index confirms the
+        // selection was made. The default no-op impl returns false, preventing
+        // a future menu that omits the override from silently accepting
+        // whatever row happened to be keyboard-selected.
+        if !menu.select_by_snapshot_index(index, ctx) {
+            return;
+        }
+        let Some(accepted) = menu.accept(ctx) else {
+            return;
+        };
+        self.input_view.update(ctx, |input, ctx| {
+            input.route_inline_menu_acceptance(accepted, ctx);
+        });
+    }
+
     fn select_tui_slash_command(&mut self, command: &StaticCommand, ctx: &mut ViewContext<Self>) {
         if command.kind == SlashCommandKind::MoveToCloud {
             self.input_view.update(ctx, |input, ctx| {
@@ -4239,7 +4268,21 @@ impl TuiView for TuiTerminalSessionView {
                     self.suggestions_mode.as_ref(ctx).mode(),
                     ctx,
                 )
-                .and_then(|menu| menu.render(ctx))
+                .and_then(|menu| {
+                    menu.render_with_interaction(
+                        ctx,
+                        |index, event_ctx, _| {
+                            event_ctx.dispatch_typed_action(
+                                TuiTerminalSessionAction::InlineMenuMouseAcceptRow(index),
+                            );
+                        },
+                        |delta, event_ctx, _| {
+                            event_ctx.dispatch_typed_action(
+                                TuiTerminalSessionAction::InlineMenuMouseScrollBy(delta),
+                            );
+                        },
+                    )
+                })
             })
             .flatten();
         let builder = TuiUiBuilder::from_app(ctx);
@@ -4559,6 +4602,16 @@ impl TypedActionView for TuiTerminalSessionView {
             }
             TuiTerminalSessionAction::StartVoiceInput => {
                 self.start_voice_input(VoiceInputStartSource::Keybinding, ctx);
+            }
+            TuiTerminalSessionAction::InlineMenuMouseAcceptRow(index) => {
+                self.handle_inline_menu_mouse_accept(*index, ctx);
+            }
+            TuiTerminalSessionAction::InlineMenuMouseScrollBy(delta) => {
+                let mode = self.suggestions_mode.as_ref(ctx).mode();
+                if let Some(menu) = active_inline_menu(&self.inline_menus, mode, ctx) {
+                    menu.scroll_by_delta(*delta, ctx);
+                    ctx.notify();
+                }
             }
             TuiTerminalSessionAction::ToggleVoiceInput => self.toggle_voice_input(ctx),
         }

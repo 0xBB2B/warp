@@ -178,6 +178,31 @@ impl TuiPromptAndCommandHistoryMenuModel {
         self.preview_selection(ctx);
         ctx.emit(TuiPromptAndCommandHistoryMenuEvent::Updated);
     }
+    pub(crate) fn select_at_snapshot_index(
+        &mut self,
+        index: usize,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        if !self.has_open_state() {
+            return false;
+        }
+        let selected =
+            if let TuiPromptAndCommandHistoryMenuState::Open { list, .. } = &mut self.state {
+                list.select_absolute(index, MAX_VISIBLE_ROWS, |_| true)
+            } else {
+                false
+            };
+        self.preview_selection(ctx);
+        ctx.emit(TuiPromptAndCommandHistoryMenuEvent::Updated);
+        selected
+    }
+
+    pub(crate) fn scroll_by_delta(&mut self, delta: isize, ctx: &mut ModelContext<Self>) {
+        if let TuiPromptAndCommandHistoryMenuState::Open { list, .. } = &mut self.state {
+            list.scroll_by(delta, MAX_VISIBLE_ROWS);
+        }
+        ctx.emit(TuiPromptAndCommandHistoryMenuEvent::Updated);
+    }
 
     /// Moves selection toward newer history items and previews the highlighted one.
     /// Moving down past the newest row, or from an empty list, closes the menu
@@ -276,6 +301,7 @@ impl TuiPromptAndCommandHistoryMenuModel {
                 .collect(),
             selected_index: list.selected_index(),
             scroll_offset: list.scroll_offset(),
+            scroll_anchor: list.scroll_anchor(),
             max_visible_rows: MAX_VISIBLE_ROWS,
             status,
         })

@@ -2450,6 +2450,7 @@ dependencies = [
  "hex",
  "instant",
  "is_executable",
+ "itertools 0.14.0",
  "log",
  "nix 0.26.4",
  "serde",
@@ -2458,6 +2459,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tracing",
+ "warp_core",
  "warp_errors",
 ]
 

@@ -308,3 +308,11 @@ pub fn agent_conversations_cloud_metadata_load_failed(app: &warpui::AppContext) 
     crate::ai::agent_conversations_model::AgentConversationsModel::as_ref(app)
         .cloud_conversation_metadata_load_failed()
 }
+
+/// Resolves the user-facing name for an MCP server from its installation/template
+/// UUID. Returns `None` when the server is unknown (e.g. a legacy/flat MCP call
+/// with no server id, or the server is not installed). Used by the TUI to surface
+/// tool/server identity in permission cards and transcript labels.
+pub fn mcp_server_name_for_id(uuid: &uuid::Uuid, app: &warpui::AppContext) -> Option<String> {
+    crate::ai::mcp::TemplatableMCPServerManager::get_mcp_name(uuid, app)
+}

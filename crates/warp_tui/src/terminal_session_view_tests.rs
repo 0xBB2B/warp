@@ -188,7 +188,7 @@ fn footer_uses_pipes_between_figma_groups_and_preserves_within_group_separators(
             assert_eq!(
                 render_element(row, ctx, 160).to_lines(),
                 vec![
-                    "Auto-approve • Auto-queue | model /tmp/warp ↬ main | ↑1 ↓2 | +31 -12 | 40 credits | 43% context used | July 20, 2026 • 1:08pm | ❒ 1/10 | Voice"
+                    "Auto-approve • Auto-queue | model /tmp/warp ⊢ main | ↑1 ↓2 | +31 -12 | 40 credits | 43% context used | July 20, 2026 • 1:08pm | ❒ 1/10 | Voice"
                         .to_owned()
                 ],
             );
@@ -2251,7 +2251,7 @@ fn assert_footer_segments_absent(lines: &[String]) {
         "a replacing hint should contain no statusline group dividers: {row}"
     );
     assert!(
-        !row.contains(" ↬ "),
+        !row.contains(" ⊢ "),
         "the cwd/branch section is absent: {row}"
     );
     assert!(
@@ -2381,7 +2381,7 @@ fn footer_renders_agent_sections_left_aligned() {
 
             assert_eq!(
                 lines,
-                vec!["TestModel /home/user/warp ↬ main | 2.5 credits | +3 -1"],
+                vec!["TestModel /home/user/warp ⊢ main | 2.5 credits | +3 -1"],
                 "agent footer is left-aligned in order model → cwd/branch → usage → diff"
             );
             assert!(
@@ -2446,7 +2446,7 @@ fn footer_renders_shell_mode_sections_without_model_or_usage() {
 
             assert_eq!(
                 lines,
-                vec![format!("{SHELL_MODE_HINT} /home/user/warp ↬ main | +3 -1")],
+                vec![format!("{SHELL_MODE_HINT} /home/user/warp ⊢ main | +3 -1")],
                 "shell footer leads with the shell-mode indicator and hides model/usage"
             );
             assert!(

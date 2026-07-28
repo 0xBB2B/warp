@@ -431,7 +431,7 @@ impl FooterSegment {
     fn separator_to(&self, next: &Self) -> &'static str {
         match (self, next) {
             (Self::ShellMode | Self::Model(_), Self::WorkingDirectory(_)) => " ",
-            (Self::WorkingDirectory(_), Self::GitBranch(_)) => " ↬ ",
+            (Self::WorkingDirectory(_), Self::GitBranch(_)) => " ⊢ ",
             (Self::ActiveIndicator(_), Self::ActiveIndicator(_)) => " • ",
             (
                 Self::WorkingDirectory(_) | Self::GitBranch(_),
@@ -474,7 +474,7 @@ struct FooterSegments {
 }
 /// Builds the status row from resolved segments. Working directory follows a
 /// leading shell-mode or model label with a plain space; an immediately
-/// following branch uses the existing ` ↬ ` relationship marker. Items in
+/// following branch uses ` ⊢ ` as the relationship marker. Items in
 /// different Figma groups use ` | `; other adjacent pairs use ` • `. The first
 /// item never receives a separator.
 fn render_status_footer_row(segments: FooterSegments, builder: &TuiUiBuilder) -> TuiFlex {

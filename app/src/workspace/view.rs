@@ -3314,7 +3314,8 @@ impl Workspace {
             }
             AISettingsChangedEvent::IsActiveAIEnabled { .. }
             | AISettingsChangedEvent::ThinkingDisplayMode { .. }
-            | AISettingsChangedEvent::PromptSubmissionMode { .. } => {
+            | AISettingsChangedEvent::PromptSubmissionMode { .. }
+            | AISettingsChangedEvent::AutoApproveBypassesCommandDenylist { .. } => {
                 ctx.notify();
             }
             AISettingsChangedEvent::ShowAgentNotifications { .. } => {
@@ -23330,6 +23331,13 @@ impl Workspace {
                 .set
                 .insert(flags::INCLUDE_AGENT_COMMANDS_IN_HISTORY_FLAG);
         }
+
+        if *ai_settings.auto_approve_bypasses_command_denylist.value() {
+            context
+                .set
+                .insert(flags::AUTO_APPROVE_BYPASSES_COMMAND_DENYLIST_FLAG);
+        }
+
         if *ai_settings.memory_enabled.value() {
             context.set.insert(flags::AI_RULES_FLAG);
         }

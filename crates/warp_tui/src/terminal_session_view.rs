@@ -54,7 +54,7 @@ use warpui_core::r#async::{SpawnedFutureHandle, Timer};
 use warpui_core::elements::MouseStateHandle;
 use warpui_core::elements::tui::{
     TuiAnimated, TuiChildView, TuiConstrainedBox, TuiContainer, TuiElement, TuiFlex, TuiHoverable,
-    TuiSelectionHandle, TuiSize, TuiStyle, TuiText,
+    TuiSelectionHandle, TuiSize, TuiStyle, TuiText, TuiViewportedListState,
 };
 use warpui_core::keymap::macros::*;
 use warpui_core::keymap::{self, EditableBinding, FixedBinding};
@@ -143,6 +143,7 @@ mod input_detection;
 mod shortcuts;
 pub(crate) mod state;
 mod status_menu;
+mod todo_menu;
 use self::completions::CompletionRequestState;
 use self::input_detection::InputDetectionState;
 use self::state::{
@@ -152,6 +153,7 @@ use self::state::{
 /// Width used before the first layout pass pushes the real terminal width into the editor.
 const INITIAL_INPUT_WIDTH: u16 = 80;
 const INLINE_MENU_TOP_PADDING_ROWS: u16 = 1;
+const MAX_READ_ONLY_MENU_ROWS: u16 = 10;
 const MAX_INPUT_TEXT_ROWS: u16 = 6;
 const AUTO_APPROVE_FEEDBACK_DURATION: Duration = Duration::from_secs(3);
 const STATUSLINE_DATETIME_REPAINT_INTERVAL: Duration = Duration::from_secs(60);
@@ -176,6 +178,12 @@ fn status_menu_is_open(mode: TuiInputSuggestionsMode) -> bool {
     matches!(
         mode,
         TuiInputSuggestionsMode::ReadOnlyMenu(TuiReadOnlyMenuKind::Status)
+    )
+}
+fn todo_menu_is_open(mode: TuiInputSuggestionsMode) -> bool {
+    matches!(
+        mode,
+        TuiInputSuggestionsMode::ReadOnlyMenu(TuiReadOnlyMenuKind::Todos)
     )
 }
 const SESSION_CAN_CANCEL_RESTORE_FLAG: &str = "TuiSessionCanCancelRestore";
@@ -490,7 +498,7 @@ enum FooterSegment {
     GitDiff { additions: usize, deletions: usize },
     GitBranchStatus(String),
     DateTime(Box<dyn TuiElement>),
-    AgentTodoList(String),
+    AgentTodoList(Box<dyn TuiElement>),
     VoiceInput(Box<dyn TuiElement>),
 }
 
@@ -570,6 +578,7 @@ fn render_status_footer_row(segments: FooterSegments, builder: &TuiUiBuilder) ->
             FooterSegment::Model(element)
             | FooterSegment::CreditUsage(element)
             | FooterSegment::DateTime(element)
+            | FooterSegment::AgentTodoList(element)
             | FooterSegment::VoiceInput(element) => {
                 row = row.child(element);
             }
@@ -579,7 +588,7 @@ fn render_status_footer_row(segments: FooterSegments, builder: &TuiUiBuilder) ->
             FooterSegment::ContextWindowUsage(usage) => {
                 row = row.child(TuiText::new(usage).with_style(muted).truncate().finish());
             }
-            FooterSegment::GitBranchStatus(value) | FooterSegment::AgentTodoList(value) => {
+            FooterSegment::GitBranchStatus(value) => {
                 row = row.child(TuiText::new(value).with_style(muted).truncate().finish());
             }
             FooterSegment::GitDiff {
@@ -716,6 +725,8 @@ pub(crate) enum TuiTerminalSessionAction {
     ToggleUsageDisplay,
     /// Toggle the completed-response summary for the selected conversation.
     ToggleResponseSummaryVisibility,
+    /// Toggle the selected conversation's active TODO list above the input.
+    ToggleTodoMenu,
     /// Click on the footer's active-model label: toggles the inline model
     /// picker (the same menu `/model` surfaces).
     ToggleModelMenu,
@@ -766,6 +777,10 @@ pub(crate) struct TuiTerminalSessionView {
     inline_menus: Vec<TuiInlineMenu>,
     suggestions_mode: ModelHandle<TuiInputSuggestionsModeModel>,
     read_only_menu_selection: TuiSelectionHandle,
+    read_only_menu_viewport: TuiViewportedListState,
+    /// The selected conversation and active TODO-list generation currently
+    /// displayed by an open TODO menu.
+    open_todo_menu_list_key: Option<(AIConversationId, usize)>,
     /// Session-owned live state model shared by this surface and its input view.
     session_state: ModelHandle<TuiTerminalSessionStateModel>,
     conversation_menu: ModelHandle<TuiConversationMenuModel>,
@@ -803,6 +818,8 @@ pub(crate) struct TuiTerminalSessionView {
     /// (not created inline during render) so it survives element-tree rebuilds
     /// — the same `MouseStateHandle` pattern as [`UsageToggle`].
     model_label_hover: MouseStateHandle,
+    /// Hover and click state for the configured TODO statusline control.
+    todo_list_mouse: MouseStateHandle,
     /// Hover and click state for the configured Voice statusline control.
     voice_input_mouse: MouseStateHandle,
     keyboard_enhancement_supported: bool,
@@ -1581,6 +1598,8 @@ impl TuiTerminalSessionView {
             }
         });
         let read_only_menu_selection = TuiSelectionHandle::default();
+        let read_only_menu_viewport = TuiViewportedListState::new_at_end();
+        read_only_menu_viewport.scroll_to_rows_from_top(0);
         let slash_commands_source = ctx.add_model(|ctx| {
             TuiSlashCommandDataSource::new(
                 TuiSlashCommandDataSourceArgs {
@@ -1860,8 +1879,19 @@ impl TuiTerminalSessionView {
             view.handle_completion_editor_changed(ctx);
             ctx.notify();
         });
-        ctx.subscribe_to_model(&suggestions_mode, |view, _, _, ctx| {
+        ctx.subscribe_to_model(&suggestions_mode, |view, _, event, ctx| {
             view.read_only_menu_selection.clear();
+            view.open_todo_menu_list_key = match event.mode.read_only_menu() {
+                Some(TuiReadOnlyMenuKind::Todos) => view.active_todo_menu_list_key(ctx),
+                Some(TuiReadOnlyMenuKind::Shortcuts | TuiReadOnlyMenuKind::Status) | None => None,
+            };
+            let scroll_top = event
+                .mode
+                .read_only_menu()
+                .map(|kind| view.read_only_menu_initial_scroll_top(kind, ctx))
+                .unwrap_or_default();
+            view.read_only_menu_viewport
+                .scroll_to_rows_from_top(scroll_top);
             ctx.notify();
         });
         // The warping indicator between the transcript and the input box
@@ -1877,6 +1907,8 @@ impl TuiTerminalSessionView {
             if view.is_focused_session(ctx) {
                 view.refresh_orchestration_tab_state(ctx);
             }
+            view.sync_open_todo_menu_list(ctx);
+            ctx.notify();
         });
         ctx.subscribe_to_model(
             &QueuedQueryModel::handle(ctx),
@@ -2058,6 +2090,8 @@ impl TuiTerminalSessionView {
             inline_menus,
             suggestions_mode,
             read_only_menu_selection,
+            read_only_menu_viewport,
+            open_todo_menu_list_key: None,
             session_state,
             conversation_menu,
             model_menu,
@@ -2080,6 +2114,7 @@ impl TuiTerminalSessionView {
             usage_toggle: UsageToggle::default(),
             hidden_response_summary_exchange_ids: HashSet::new(),
             model_label_hover: MouseStateHandle::default(),
+            todo_list_mouse: MouseStateHandle::default(),
             voice_input_mouse: MouseStateHandle::default(),
             keyboard_enhancement_supported,
             ai_context_model: context_model,
@@ -2385,18 +2420,23 @@ impl TuiTerminalSessionView {
                 .finish(),
             );
         }
-        if let Some(menu) = state.read_only_menu() {
-            let menu = match menu {
-                TuiReadOnlyMenuKind::Shortcuts => {
-                    let keymap_context = self.keymap_context(ctx);
-                    shortcuts::menu(state, &keymap_context, builder, ctx)
-                }
-                TuiReadOnlyMenuKind::Status => {
-                    status_menu::menu(self.compute_status_info(ctx), builder)
-                }
-            };
-            let menu = menu.render(
+        if let Some(menu) = state.read_only_menu().and_then(|kind| match kind {
+            TuiReadOnlyMenuKind::Shortcuts => {
+                let keymap_context = self.keymap_context(ctx);
+                Some(shortcuts::menu(state, &keymap_context, builder, ctx))
+            }
+            TuiReadOnlyMenuKind::Status => {
+                Some(status_menu::menu(self.compute_status_info(ctx), builder))
+            }
+            TuiReadOnlyMenuKind::Todos => self
+                .conversation_selection
+                .as_ref(ctx)
+                .selected_conversation(ctx)
+                .and_then(|conversation| todo_menu::active_todo_menu(conversation, builder)),
+        }) {
+            let menu = menu.render_with_viewport(
                 self.read_only_menu_selection.clone(),
+                self.read_only_menu_viewport.clone(),
                 builder,
                 |event_ctx, _| {
                     event_ctx.dispatch_typed_action(
@@ -2410,9 +2450,13 @@ impl TuiTerminalSessionView {
                 },
             );
             content = content.child(
-                TuiContainer::new(menu)
-                    .with_padding_top(INLINE_MENU_TOP_PADDING_ROWS)
-                    .finish(),
+                TuiConstrainedBox::new(
+                    TuiContainer::new(menu)
+                        .with_padding_top(INLINE_MENU_TOP_PADDING_ROWS)
+                        .finish(),
+                )
+                .with_max_rows(MAX_READ_ONLY_MENU_ROWS + INLINE_MENU_TOP_PADDING_ROWS)
+                .finish(),
             );
         }
         let input = if self.input_view.as_ref(ctx).voice_state(ctx) == TuiVoiceInputState::Listening
@@ -2843,9 +2887,13 @@ impl TuiTerminalSessionView {
             BlocklistAIHistoryEvent::AppendedExchange { .. }
                 | BlocklistAIHistoryEvent::UpdatedStreamingExchange { .. }
                 | BlocklistAIHistoryEvent::UpdatedConversationStatus { .. }
+                | BlocklistAIHistoryEvent::UpdatedTodoList { .. }
                 | BlocklistAIHistoryEvent::UpdatedAutoexecuteOverride { .. }
         ) {
             ctx.notify();
+        }
+        if matches!(event, BlocklistAIHistoryEvent::UpdatedTodoList { .. }) {
+            self.sync_open_todo_menu_list(ctx);
         }
 
         if matches!(
@@ -3371,11 +3419,32 @@ impl TuiTerminalSessionView {
                     .and_then(|conversation| conversation.active_todo_list())
                     .filter(|todo_list| !todo_list.is_empty())
                     .map(|todo_list| {
-                        FooterSegment::AgentTodoList(format_todo_progress(
+                        let hovered = self
+                            .todo_list_mouse
+                            .lock()
+                            .is_ok_and(|state| state.is_hovered());
+                        let style = if hovered {
+                            builder.primary_text_style()
+                        } else {
+                            builder.muted_text_style()
+                        };
+                        let progress = format_todo_progress(
                             todo_list.completed_items().len(),
                             todo_list.len(),
                             todo_list.is_finished(),
-                        ))
+                        );
+                        FooterSegment::AgentTodoList(
+                            TuiHoverable::new(
+                                self.todo_list_mouse.clone(),
+                                TuiText::new(progress).with_style(style).truncate().finish(),
+                            )
+                            .on_click(|event_ctx, _| {
+                                event_ctx.dispatch_typed_action(
+                                    TuiTerminalSessionAction::ToggleTodoMenu,
+                                );
+                            })
+                            .finish(),
+                        )
                     }),
                 TuiStatuslineItem::VoiceInput => voice_statusline_visible.then(|| {
                     FooterSegment::VoiceInput(self.render_voice_statusline(&builder, ctx))
@@ -3530,6 +3599,84 @@ impl TuiTerminalSessionView {
         }
     }
 
+    fn has_active_todo_list(&self, ctx: &AppContext) -> bool {
+        self.active_todo_menu_list_key(ctx).is_some()
+    }
+
+    fn active_todo_menu_list_key(&self, ctx: &AppContext) -> Option<(AIConversationId, usize)> {
+        let selection = self.conversation_selection.as_ref(ctx);
+        let conversation_id = selection.selected_conversation_id(ctx)?;
+        let conversation = selection.selected_conversation(ctx)?;
+        conversation
+            .active_todo_list()
+            .filter(|todo_list| !todo_list.is_empty())?;
+        Some((conversation_id, conversation.todo_lists().len()))
+    }
+
+    fn read_only_menu_initial_scroll_top(
+        &self,
+        kind: TuiReadOnlyMenuKind,
+        ctx: &AppContext,
+    ) -> usize {
+        match kind {
+            TuiReadOnlyMenuKind::Shortcuts | TuiReadOnlyMenuKind::Status => 0,
+            TuiReadOnlyMenuKind::Todos => self
+                .conversation_selection
+                .as_ref(ctx)
+                .selected_conversation(ctx)
+                .and_then(AIConversation::active_todo_list)
+                .filter(|todo_list| !todo_list.pending_items().is_empty())
+                .map(|todo_list| todo_list.completed_items().len().saturating_add(1))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn close_todo_menu_if_unavailable(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.has_active_todo_list(ctx) {
+            return;
+        }
+        self.suggestions_mode.update(ctx, |mode, ctx| {
+            mode.close_if_active(
+                TuiInputSuggestionsMode::ReadOnlyMenu(TuiReadOnlyMenuKind::Todos),
+                ctx,
+            );
+        });
+    }
+
+    fn sync_open_todo_menu_list(&mut self, ctx: &mut ViewContext<Self>) {
+        if !todo_menu_is_open(self.suggestions_mode.as_ref(ctx).mode()) {
+            self.open_todo_menu_list_key = None;
+            return;
+        }
+        let key = self.active_todo_menu_list_key(ctx);
+        let Some(key) = key else {
+            self.open_todo_menu_list_key = None;
+            self.close_todo_menu_if_unavailable(ctx);
+            return;
+        };
+        if self.open_todo_menu_list_key.as_ref() != Some(&key) {
+            self.open_todo_menu_list_key = Some(key);
+            let scroll_top =
+                self.read_only_menu_initial_scroll_top(TuiReadOnlyMenuKind::Todos, ctx);
+            self.read_only_menu_viewport
+                .scroll_to_rows_from_top(scroll_top);
+        }
+    }
+
+    fn toggle_todo_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.has_active_todo_list(ctx) {
+            return;
+        }
+        let todo_mode = TuiInputSuggestionsMode::ReadOnlyMenu(TuiReadOnlyMenuKind::Todos);
+        self.suggestions_mode.update(ctx, |mode, ctx| {
+            if mode.mode() == todo_mode {
+                mode.close_if_active(todo_mode, ctx);
+            } else {
+                mode.set_mode(todo_mode, ctx);
+            }
+        });
+        self.sync_open_todo_menu_list(ctx);
+    }
     fn render_response_summary_for_exchange(
         &self,
         exchange_id: AIAgentExchangeId,
@@ -5070,6 +5217,7 @@ impl TypedActionView for TuiTerminalSessionView {
             TuiTerminalSessionAction::ToggleResponseSummaryVisibility => {
                 self.toggle_response_summary_visibility(ctx)
             }
+            TuiTerminalSessionAction::ToggleTodoMenu => self.toggle_todo_menu(ctx),
             TuiTerminalSessionAction::ToggleModelMenu => self.toggle_model_menu(ctx),
             TuiTerminalSessionAction::ToggleAutoApprove { show_feedback } => {
                 self.toggle_auto_approve(*show_feedback, ctx)

@@ -111,6 +111,7 @@ pub enum SlashCommandKind {
     Rewind,
     ExportToClipboard,
     ExportToFile,
+    VimMode,
     Status,
     CopyDebuggingId,
 }

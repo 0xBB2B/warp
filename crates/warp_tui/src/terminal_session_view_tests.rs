@@ -2341,7 +2341,7 @@ fn input_adjacent_surfaces_follow_figma_outer_edge_alignment() {
         let lines = render_session(&mut app, &view, 80, 24);
         let input_border_column = lines
             .iter()
-            .find(|line| line.contains('┌'))
+            .find(|line| line.contains('▏'))
             .map(|line| first_visible_column(line))
             .unwrap_or_else(|| panic!("input border must render:\n{}", lines.join("\n")));
         let statusline_column = lines
@@ -2757,7 +2757,7 @@ fn bootstrap_renders_starting_shell_above_input() {
             .iter()
             .enumerate()
             .skip(status_index + 1)
-            .find(|(_, line)| line.contains('┌') || line.contains('─'))
+            .find(|(_, line)| line.contains('▏') || line.contains('▁') || line.contains('─'))
             .map(|(index, _)| index)
             .expect("bootstrap input border should render below the status");
         assert!(status_index < input_index);
@@ -2995,7 +2995,7 @@ fn long_running_command_keeps_input_hidden() {
         assert!(
             !lines
                 .iter()
-                .any(|line| line.contains('┌') || line.contains('─')),
+                .any(|line| line.chars().any(|glyph| "┌┐└┘─│▁▏▕▔".contains(glyph))),
             "LRC must keep the input editor hidden:\n{}",
             lines.join("\n")
         );
@@ -3137,7 +3137,7 @@ fn manual_attach_and_detach_switch_running_command_input_ownership() {
 
         let lines = render_session(&mut app, &view, 80, 40);
         assert!(
-            lines.iter().any(|line| line.contains('┌')),
+            lines.iter().any(|line| line.contains('▏')),
             "tagging in should render the composer:\n{}",
             lines.join("\n")
         );
@@ -3297,7 +3297,7 @@ fn tagged_in_alt_screen_keeps_output_and_composer_visible() {
             lines.join("\n")
         );
         assert!(
-            lines.iter().any(|line| line.contains('┌')),
+            lines.iter().any(|line| line.contains('▏')),
             "tagged-in alternate screen should render the composer:\n{}",
             lines.join("\n")
         );
@@ -3378,7 +3378,7 @@ fn agent_controlled_alt_screen_keeps_output_and_composer_visible() {
             .expect("alternate-screen output should start in the output area");
         let input_row = lines
             .iter()
-            .position(|line| line.contains('┌'))
+            .position(|line| line.contains('▏'))
             .expect("agent-controlled alternate screen should render the composer");
         assert!(
             alt_screen_row < input_row,
@@ -3425,9 +3425,10 @@ fn user_controlled_alt_screen_keeps_full_session_input_on_the_pty() {
             lines.join("\n")
         );
         assert!(
-            !lines
-                .iter()
-                .any(|line| line.contains('┌') || line.contains("auto (cost-efficient)")),
+            !lines.iter().any(|line| {
+                line.chars().any(|glyph| "┌┐└┘─│▁▏▕▔".contains(glyph))
+                    || line.contains("auto (cost-efficient)")
+            }),
             "user-controlled alternate screen should not render the agent composer:\n{}",
             lines.join("\n")
         );

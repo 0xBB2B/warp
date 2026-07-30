@@ -198,7 +198,7 @@ const SESSION_CAN_DETACH_AGENT_FROM_RUNNING_COMMAND_FLAG: &str =
     "TuiSessionCanDetachAgentFromRunningCommand";
 const SESSION_CAN_ACCEPT_BLOCKED_TERMINAL_USE_ACTION_FLAG: &str =
     "TuiSessionCanAcceptBlockedTerminalUseAction";
-pub(crate) const SESSION_COMPOSER_OWNS_INPUT_FLAG: &str = "TuiSessionComposerOwnsInput";
+pub(crate) const SESSION_COMPOSER_SHORTCUTS_ACTIVE_FLAG: &str = "TuiSessionComposerShortcutsActive";
 pub(crate) const PASTE_IMAGE_BINDING_NAME: &str = "tui:session:paste_image";
 pub(crate) const AUTO_APPROVE_TOGGLE_BINDING_NAME: &str = "tui:session:toggle_auto_approve";
 pub(crate) const ACCEPT_BLOCKED_TERMINAL_USE_ACTION_BINDING_NAME: &str =
@@ -812,7 +812,7 @@ pub(crate) fn init(app: &mut AppContext) {
         )
         .with_context_predicate(
             (id!(TuiInputView::ui_name()) | id!(TuiTerminalSessionView::ui_name()))
-                & id!(SESSION_COMPOSER_OWNS_INPUT_FLAG),
+                & id!(SESSION_COMPOSER_SHORTCUTS_ACTIVE_FLAG),
         )
         .with_group(TUI_BINDING_GROUP)
         .with_key_binding("ctrl-v"),
@@ -823,7 +823,7 @@ pub(crate) fn init(app: &mut AppContext) {
         )
         .with_context_predicate(
             (id!(TuiInputView::ui_name()) | id!(TuiTerminalSessionView::ui_name()))
-                & id!(SESSION_COMPOSER_OWNS_INPUT_FLAG),
+                & id!(SESSION_COMPOSER_SHORTCUTS_ACTIVE_FLAG),
         )
         .with_group(TUI_BINDING_GROUP)
         .with_key_binding("ctrl-shift-V"),
@@ -834,7 +834,7 @@ pub(crate) fn init(app: &mut AppContext) {
         )
         .with_context_predicate(
             (id!(TuiInputView::ui_name()) | id!(TuiTerminalSessionView::ui_name()))
-                & id!(SESSION_COMPOSER_OWNS_INPUT_FLAG),
+                & id!(SESSION_COMPOSER_SHORTCUTS_ACTIVE_FLAG),
         )
         .with_group(TUI_BINDING_GROUP)
         .with_key_binding("ctrl-s"),
@@ -846,7 +846,7 @@ pub(crate) fn init(app: &mut AppContext) {
         )
         .with_context_predicate(
             (id!(TuiInputView::ui_name()) | id!(TuiTerminalSessionView::ui_name()))
-                & id!(SESSION_COMPOSER_OWNS_INPUT_FLAG),
+                & id!(SESSION_COMPOSER_SHORTCUTS_ACTIVE_FLAG),
         )
         .with_group(TUI_BINDING_GROUP)
         .with_key_binding("alt-v"),
@@ -3592,12 +3592,12 @@ impl TuiTerminalSessionView {
     fn with_voice_hold_handler(
         &self,
         child: Box<dyn TuiElement>,
-        composer_owns_input: bool,
+        composer_shortcuts_active: bool,
         ctx: &AppContext,
     ) -> Box<dyn TuiElement> {
         let active_hold_key = self.input_view.as_ref(ctx).voice_hold_key(ctx);
         if !self.keyboard_enhancement_supported
-            || (!composer_owns_input && active_hold_key.is_none())
+            || (!composer_shortcuts_active && active_hold_key.is_none())
         {
             return child;
         }
@@ -3607,7 +3607,7 @@ impl TuiTerminalSessionView {
         TuiEventHandler::new(child)
             .on_modifier_key_changed(move |key, state, event_ctx, _| {
                 if key != expected_key
-                    || (matches!(state, KeyState::Pressed) && !composer_owns_input)
+                    || (matches!(state, KeyState::Pressed) && !composer_shortcuts_active)
                 {
                     return TuiDispatchEventResult::PropagateToParent;
                 }
@@ -4584,7 +4584,7 @@ impl TuiView for TuiTerminalSessionView {
         }
         if state
             .as_ref()
-            .is_some_and(|state| state.agent_is_tagged_in() && state.composer_owns_input())
+            .is_some_and(|state| state.agent_is_tagged_in() && state.composer_shortcuts_active())
         {
             context
                 .set
@@ -4606,9 +4606,9 @@ impl TuiView for TuiTerminalSessionView {
         }
         if state
             .as_ref()
-            .is_some_and(|state| state.composer_owns_input())
+            .is_some_and(|state| state.composer_shortcuts_active())
         {
-            context.set.insert(SESSION_COMPOSER_OWNS_INPUT_FLAG);
+            context.set.insert(SESSION_COMPOSER_SHORTCUTS_ACTIVE_FLAG);
             if attachment_focus_available(
                 self.is_shell_mode(ctx),
                 self.attachment_bar.as_ref(ctx).should_render(ctx),
@@ -4620,13 +4620,13 @@ impl TuiView for TuiTerminalSessionView {
     }
 
     fn render(&self, ctx: &AppContext) -> Box<dyn TuiElement> {
-        let (content, composer_owns_input) = self.render_session_content(ctx);
-        self.with_voice_hold_handler(content, composer_owns_input, ctx)
+        let (content, composer_shortcuts_active) = self.render_session_content(ctx);
+        self.with_voice_hold_handler(content, composer_shortcuts_active, ctx)
     }
 }
 
 impl TuiTerminalSessionView {
-    /// Renders the session body and reports whether the composer owns input.
+    /// Renders the session body and reports whether composer shortcuts are active.
     ///
     /// Every path returns through [`TuiView::render`]'s single hold-handler
     /// wrap, so a session state that renders its own screen — a conversation
@@ -4749,7 +4749,7 @@ impl TuiTerminalSessionView {
             } else {
                 session
             };
-            return (session, state.composer_owns_input());
+            return (session, state.composer_shortcuts_active());
         }
 
         // Ctrl-c (cancel/clear/exit) is handled by the keymap pass via the
@@ -4926,7 +4926,7 @@ impl TuiTerminalSessionView {
             session
         };
 
-        (session, state.composer_owns_input())
+        (session, state.composer_shortcuts_active())
     }
 }
 

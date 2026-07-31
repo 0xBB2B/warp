@@ -2181,7 +2181,8 @@ fn response_summary_visibility_is_independent_from_the_footer_usage_mode() {
 
         let totals = ConversationUsageTotals {
             credits_spent: 2.5,
-            cost_in_cents: 3.2,
+            cost_in_cents: Some(3.2),
+            has_usage: true,
         };
 
         assert_eq!(
@@ -4491,7 +4492,8 @@ fn footer_renders_agent_sections_left_aligned() {
                 TuiUsageDisplayMode::default(),
                 ConversationUsageTotals {
                     credits_spent: 2.5,
-                    cost_in_cents: 0.0,
+                    cost_in_cents: Some(0.0),
+                    has_usage: true,
                 },
                 ctx,
                 |_, _| {},
@@ -4531,6 +4533,86 @@ fn footer_renders_agent_sections_left_aligned() {
                 "the first segment starts at the left edge (no flex-spacer padding)"
             );
             assert!(!line.contains('←'), "the conversations callout is absent");
+        });
+    });
+}
+
+/// The footer's usage entry is gated on `has_usage`: a freshly started
+/// conversation that has not reported any usage yet must not surface totals.
+#[test]
+fn footer_usage_entry_is_hidden_until_the_conversation_reports_usage() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+
+        view.update(&mut app, |view, ctx| {
+            view.conversation_selection.update(ctx, |selection, ctx| {
+                selection
+                    .try_start_new_conversation(AgentViewEntryOrigin::Tui, ctx)
+                    .expect("test conversation should start");
+            });
+        });
+
+        view.read(&app, |view, ctx| {
+            assert!(
+                view.conversation_selection
+                    .as_ref(ctx)
+                    .selected_conversation(ctx)
+                    .is_some(),
+                "a conversation must be selected for the gate to be meaningful"
+            );
+            assert!(
+                view.selected_conversation_usage_totals(ctx).is_none(),
+                "a conversation without usage must not surface footer totals"
+            );
+        });
+    });
+}
+
+/// A conversation with usage but an unknown historical cost (legacy restore)
+/// still renders the usage entry — `Cost unavailable` in cost mode, never
+/// `$0.00` — even when credits happen to be zero.
+#[test]
+fn footer_usage_entry_shows_unknown_cost_even_with_zero_credits() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            ctx.add_singleton_model(|_| Appearance::mock());
+            let builder = TuiUiBuilder::from_app(ctx);
+            let usage = UsageToggle::default().render_entry(
+                TuiUsageDisplayMode::Cost,
+                ConversationUsageTotals {
+                    credits_spent: 0.0,
+                    cost_in_cents: None,
+                    has_usage: true,
+                },
+                ctx,
+                |_, _| {},
+            );
+            let row = render_status_footer_row(
+                FooterSegments {
+                    ordered: vec![
+                        FooterSegment::Model(
+                            TuiText::new("TestModel")
+                                .with_style(builder.primary_text_style())
+                                .truncate()
+                                .finish(),
+                        ),
+                        FooterSegment::CreditUsage(usage),
+                    ],
+                },
+                &builder,
+            )
+            .finish();
+            let line = render_element(row, ctx, 80).to_lines().join("\n");
+
+            assert!(
+                line.contains("Cost unavailable"),
+                "unknown historical cost renders the stable fallback text, got: {line}"
+            );
+            assert!(
+                !line.contains("$0.00"),
+                "unknown cost must never render as $0.00, got: {line}"
+            );
         });
     });
 }

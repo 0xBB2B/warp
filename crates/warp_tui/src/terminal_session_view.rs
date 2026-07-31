@@ -36,7 +36,8 @@ use warp::tui_export::{
     SlashCommandDataSource as _, SlashCommandKind, SlashCommandSelectionBehavior,
     StartAgentExecutorEvent, StartAgentRequest, StaticCommand, TelemetryEvent, TerminalColorList,
     TerminalColors, TerminalModel, TerminalSurface, TerminalSurfaceInit, TranscriptScope,
-    TuiMcpAction, TuiMcpManager, TuiMcpServerId, TuiMcpVariableValue, TuiSlashCommandDataSource,
+    TuiMcpAction, TuiMcpManager, TuiMcpServerId, TuiMcpVariableValue, TuiOnboardingMarker,
+    TuiOnboardingMarkers, TuiOnboardingMarkersEvent, TuiSlashCommandDataSource,
     TuiSlashCommandDataSourceArgs, TuiUpArrowHistoryItemKind, TuiUserInfoManager,
     TuiUserInfoManagerEvent, TuiZeroStateDataSource, UserTakeOverReason, WAKEUP_THROTTLE_PERIOD,
     WarpConfig, WarpConfigUpdateEvent, block_context_from_terminal_model,
@@ -1435,6 +1436,7 @@ impl TuiTerminalSessionView {
         exit_summary: TuiExitSummaryHandle,
         keyboard_enhancement_supported: bool,
         default_autoexecute_mode: AIConversationAutoexecuteMode,
+        handles_first_run_onboarding: bool,
         initial_settings_file_error: Option<SettingsFileError>,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
@@ -1769,6 +1771,17 @@ impl TuiTerminalSessionView {
         let suggestions_mode_for_input = suggestions_mode.clone();
         let terminal_model_for_input = model.clone();
         let orchestration_tab_bar = ctx.add_typed_action_tui_view(|_| TuiTabBarView::empty());
+        let onboarding_markers =
+            handles_first_run_onboarding.then(|| TuiOnboardingMarkers::handle(ctx));
+        let show_first_zero_state = onboarding_markers.as_ref().is_some_and(|markers| {
+            markers.update(ctx, |markers, ctx| {
+                if markers.is_ready() {
+                    markers.consume(TuiOnboardingMarker::FirstZeroState, ctx)
+                } else {
+                    true
+                }
+            })
+        });
         let session_state = ctx.add_model(|_| {
             TuiTerminalSessionStateModel::new(
                 &model,
@@ -1777,8 +1790,32 @@ impl TuiTerminalSessionView {
                 &ai_input_model,
                 &suggestions_mode,
                 &orchestration_tab_bar,
+                show_first_zero_state,
             )
         });
+        if let Some(onboarding_markers) = onboarding_markers {
+            let session_state_for_markers = session_state.clone();
+            ctx.subscribe_to_model(
+                &onboarding_markers,
+                move |_, markers, event, ctx| match event {
+                    TuiOnboardingMarkersEvent::Loading => {
+                        session_state_for_markers.update(ctx, |state, ctx| {
+                            state.set_show_first_zero_state(true, ctx);
+                        });
+                    }
+                    TuiOnboardingMarkersEvent::Ready => {
+                        let keep_showing = markers.update(ctx, |markers, ctx| {
+                            markers.consume(TuiOnboardingMarker::FirstZeroState, ctx)
+                        });
+                        session_state_for_markers.update(ctx, |state, ctx| {
+                            if state.show_first_zero_state() {
+                                state.set_show_first_zero_state(keep_showing, ctx);
+                            }
+                        });
+                    }
+                },
+            );
+        }
         let input_editor_for_input = input_editor_model.clone();
         let session_state_for_input = session_state.clone();
         let input_view = ctx.add_typed_action_tui_view(move |ctx| {
@@ -3679,6 +3716,9 @@ impl TuiTerminalSessionView {
         linked_workflow_data: Option<LinkedWorkflowData>,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.session_state.update(ctx, |state, ctx| {
+            state.set_show_first_zero_state(false, ctx);
+        });
         // A stale editor frame must not submit into a shell that is still
         // bootstrapping or has handed input to a foreground process.
         if !self.input_target().agent_editor_owns_input() {
@@ -5024,7 +5064,9 @@ impl TuiTerminalSessionView {
         let mut content = TuiFlex::column();
         let transcript_is_empty = self.transcript.as_ref(ctx).is_empty();
         self.zero_state_interaction.set_visible(transcript_is_empty);
-        if transcript_is_empty {
+        if transcript_is_empty && self.session_state.as_ref(ctx).show_first_zero_state() {
+            content = content.flex_child(self.zero_state_view.as_ref(ctx).render_first_run(ctx));
+        } else if transcript_is_empty {
             content = content.flex_child(TuiChildView::new(&self.zero_state_view).finish());
         } else {
             content = content.flex_child(TuiChildView::new(&self.transcript).finish());

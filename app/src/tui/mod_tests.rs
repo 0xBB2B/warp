@@ -100,7 +100,7 @@ fn rejects_invalid_focus_urls() {
 }
 
 #[test]
-fn explicit_start_device_login_transitions_only_from_welcome() {
+fn explicit_start_device_login_preserves_pending_logout_on_retry() {
     App::test((), |mut app| async move {
         app.add_singleton_model(|_| ServerApiProvider::new_for_test());
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
@@ -130,6 +130,26 @@ fn explicit_start_device_login_transitions_only_from_welcome() {
             assert!(matches!(
                 TuiLoginModel::as_ref(ctx).browser_flow,
                 TuiAuthBrowserFlow::DirectDeviceAuthorization
+            ));
+        });
+
+        app.update(|ctx| {
+            TuiLoginModel::handle(ctx).update(ctx, |model, _| {
+                model.phase = TuiLoginPhase::Failed {
+                    message: "Unable to open logout URL".to_owned(),
+                };
+                model.browser_flow = TuiAuthBrowserFlow::LogoutThenDeviceAuthorizationPending;
+            });
+        });
+        app.update(start_tui_device_login);
+        app.read(|ctx| {
+            assert!(matches!(
+                TuiLoginModel::as_ref(ctx).phase(),
+                TuiLoginPhase::AwaitingLogin { browser_url: None }
+            ));
+            assert!(matches!(
+                TuiLoginModel::as_ref(ctx).browser_flow,
+                TuiAuthBrowserFlow::LogoutThenDeviceAuthorizationPending
             ));
         });
     });
@@ -169,6 +189,40 @@ fn stores_device_fallback_before_opening_browser() {
         });
 
         assert!(browser_opened.get());
+    });
+}
+
+#[test]
+fn opens_only_the_current_retained_url() {
+    App::test((), |mut app| async move {
+        let browser_url =
+            "https://app.warp.dev/device?user_code=ABCD-EFGH&source=warp-agent-cli".to_owned();
+        app.add_singleton_model({
+            let browser_url = browser_url.clone();
+            move |_| login_model(TuiLoginPhase::BrowserOpenFailed { browser_url })
+        });
+        let browser_opened = Rc::new(Cell::new(false));
+        let browser_opened_for_callback = browser_opened.clone();
+        app.update(|ctx| {
+            let expected_url = browser_url.clone();
+            ctx.set_before_open_url(move |url, _| {
+                assert_eq!(url, expected_url);
+                browser_opened_for_callback.set(true);
+                url.to_owned()
+            });
+            TuiLoginModel::open_login_url("https://example.com/wrong", ctx);
+            TuiLoginModel::open_login_url(&browser_url, ctx);
+        });
+
+        assert!(browser_opened.get());
+        app.read(|ctx| {
+            assert!(matches!(
+                TuiLoginModel::as_ref(ctx).phase(),
+                TuiLoginPhase::AwaitingLogin {
+                    browser_url: Some(current_url),
+                } if current_url == &browser_url
+            ));
+        });
     });
 }
 
@@ -245,7 +299,6 @@ fn renders_device_code_request_timeout_without_id_token_prefix() {
         });
     });
 }
-
 #[test]
 fn post_logout_device_code_failure_still_opens_web_logout() {
     App::test((), |mut app| async move {

@@ -104,18 +104,28 @@ fn first_zero_state_matches_welcome_design_copy() {
         for expected in [
             "Welcome to Warp",
             "What’s different about Warp",
-            "✶ /natural-language-detection",
-            "to autodetect",
-            "prompts or shell commands",
-            "✶ /modify-settings to set up custom model",
-            "routers",
-            "✶ /orchestrate to spawn fleets of agents",
-            "✶ Run full-screen terminal apps and cd into",
-            "other directories",
+            "✶ State of the art coding agents",
+            "✶ Frontier and open-weight models",
+            "✶ Fully customizable model routers",
+            "✶ Orchestration for fleets of agents",
+            "✶ Better shell command support",
         ] {
             assert!(
                 rendered.contains(expected),
                 "first zero state should contain {expected:?}:\n{rendered}"
+            );
+        }
+        for unexpected in [
+            "/natural-language-detection",
+            "/modify-settings",
+            "/orchestrate",
+            "Run full-screen terminal apps",
+            "Orchestrate fleets of agents",
+            "Work with shell commands like in a native terminal",
+        ] {
+            assert!(
+                !rendered.contains(unexpected),
+                "first zero state should not contain {unexpected:?}:\n{rendered}"
             );
         }
         assert!(!rendered.contains("What's new"));

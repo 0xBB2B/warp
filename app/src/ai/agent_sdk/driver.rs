@@ -10,7 +10,10 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use ai::api_keys::{ApiKeyManager, AwsCredentialsRefreshStrategy};
-use ai::skills::{ParsedSkill, SKILL_PROVIDER_DEFINITIONS};
+use ai::skills::{
+    ParsedSkill, SKILL_PROVIDER_DEFINITIONS, parse_skills_dirs_env, read_skills_for_skills_dirs,
+    resolve_skills_dirs,
+};
 use anyhow::{Context as _, anyhow};
 use futures::FutureExt as _;
 use futures::channel::oneshot;
@@ -2150,6 +2153,45 @@ impl AgentDriver {
         }
     }
 
+    /// Load skills from the `WARP_SKILL_DIRS` environment variable as personal (home) tier skills.
+    ///
+    /// `WARP_SKILL_DIRS` is a comma-separated list of paths; each entry is itself a skills directory
+    /// whose **direct children** are expected to be skill folders containing `SKILL.md`. Relative
+    /// entries are resolved against the driver's working directory — not the process's current
+    /// working directory, which environment preparation may have changed (e.g. by cd-ing into a
+    /// cloned repo). Skills loaded this way behave identically to `~/.agents/skills` personal
+    /// skills—always in scope, regardless of the current working directory.
+    ///
+    /// Invalid, missing, or unreadable entries are skipped with a warning; an unset or empty
+    /// variable is a no-op.
+    async fn load_skills_dirs(foreground: &ModelSpawner<Self>) {
+        let dirs = parse_skills_dirs_env();
+        if dirs.is_empty() {
+            return;
+        }
+        log::info!(
+            "WARP_SKILL_DIRS: loading skills from {} directories",
+            dirs.len()
+        );
+        let load_result = foreground
+            .spawn(move |me, ctx| {
+                let dirs = resolve_skills_dirs(&me.working_dir, dirs);
+                let skills = read_skills_for_skills_dirs(&dirs);
+                if skills.is_empty() {
+                    log::info!("WARP_SKILL_DIRS: no skills found");
+                } else {
+                    log::info!("WARP_SKILL_DIRS: loaded {} skill(s)", skills.len());
+                }
+                SkillManager::handle(ctx).update(ctx, |manager, _| {
+                    manager.add_skills_dirs_skills(skills);
+                });
+            })
+            .await;
+        if let Err(err) = load_result {
+            log::warn!("Failed to load WARP_SKILL_DIRS skills: {err}");
+        }
+    }
+
     /// Runs the agent to completion.
     /// Driving the agent mostly requires main-thread UI framework updates, but using `async` and
     /// a `ModelSpawner` lets us express the high-level process linearly rather than in a
@@ -2450,6 +2492,12 @@ impl AgentDriver {
                 .record_value(
                     SetupStep::GlobalSkillLoading,
                     Self::load_global_skills(&foreground, global_skill_specs, global_skill_repos),
+                )
+                .await;
+            setup_events
+                .record_value(
+                    SetupStep::SkillsDirsLoading,
+                    Self::load_skills_dirs(&foreground),
                 )
                 .await;
         }

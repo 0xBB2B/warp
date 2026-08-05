@@ -35,8 +35,8 @@ use warp::tui_export::{
     ModelEvent, ParsedSlashCommandInput, PersistenceWriter, PillBarActionKind,
     PillBarInteractionEvent, PillBarPillKind, PillSwitchOutcome, PtyIntent, PtyIntentEvent,
     QueuedQueryEvent, QueuedQueryModel, RepoDetectionSessionType, RepoDetectionSource,
-    ServerConversationToken, SessionSettings, Sessions, ShellCommandExecutorEvent, SizeInfo,
-    SizeUpdate, SkillReference, SlashCommandDataSource as _, SlashCommandKind,
+    ServerConversationToken, SessionSettings, Sessions, SessionsEvent, ShellCommandExecutorEvent,
+    SizeInfo, SizeUpdate, SkillReference, SlashCommandDataSource as _, SlashCommandKind,
     SlashCommandSelectionBehavior, StartAgentExecutorEvent, StartAgentRequest, StaticCommand,
     TelemetryEvent, TerminalModel, TerminalSurface, TerminalSurfaceInit, TranscriptScope,
     TuiMcpAction, TuiMcpManager, TuiMcpServerId, TuiMcpVariableValue, TuiOnboardingMarker,
@@ -2044,6 +2044,7 @@ impl TuiTerminalSessionView {
             }
             ModelEvent::AfterBlockCompleted(completed) => {
                 view.emit_block_completed_telemetry(completed, ctx);
+                view.ensure_external_commands_are_warming(ctx);
             }
             ModelEvent::AfterBlockStarted { .. } => {
                 view.reconcile_focus(ctx);
@@ -2100,6 +2101,26 @@ impl TuiTerminalSessionView {
                 ctx.notify();
             }
         });
+        ctx.subscribe_to_model(&sessions, |view, _, event, ctx| match event {
+            SessionsEvent::SessionBootstrapped(bootstrap_event)
+                if view.active_session.as_ref(ctx).session_id(ctx)
+                    == Some(bootstrap_event.session_id) =>
+            {
+                let Some(session) = view.sessions.as_ref(ctx).get(bootstrap_event.session_id)
+                else {
+                    report_error!(
+                        "Could not find active TUI session after its bootstrap event",
+                        extra: { "session_id" => ?bootstrap_event.session_id }
+                    );
+                    return;
+                };
+                view.abort_shell_completion(ctx);
+                view.warm_shell_completion_sources(session, ctx);
+            }
+            SessionsEvent::SessionBootstrapped(_)
+            | SessionsEvent::SessionInitialized { .. }
+            | SessionsEvent::EnvironmentVariablesUpdated { .. } => {}
+        });
         ctx.subscribe_to_model(&active_session, |view, _, event, ctx| match event {
             ActiveSessionEvent::UpdatedPwd => {
                 view.abort_shell_completion(ctx);
@@ -2142,7 +2163,7 @@ impl TuiTerminalSessionView {
                 });
                 ctx.notify();
             }
-            ActiveSessionEvent::Bootstrapped => view.abort_shell_completion(ctx),
+            ActiveSessionEvent::Bootstrapped => {}
         });
         // The footer's usage entry shows the selected conversation's token/cost
         // totals: re-render when that conversation's usage metadata updates.
@@ -2254,6 +2275,9 @@ impl TuiTerminalSessionView {
         }
         if let Some(error) = initial_settings_file_error {
             view.show_settings_file_error(&error, ctx);
+        }
+        if let Some(session) = view.active_session.as_ref(ctx).session(ctx) {
+            view.warm_shell_completion_sources(session, ctx);
         }
         view
     }

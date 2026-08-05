@@ -2856,8 +2856,8 @@ pub struct TerminalView {
     /// consumed without opening.
     conversation_details_panel_auto_open_policy: ConversationDetailsPanelAutoOpenPolicy,
     /// Mouse state handle for the conversation details panel toggle button in the pane header.
-    /// Only available on non-WASM platforms (WASM uses a per-window button instead).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// On WASM this is used by the workspace-level transcript panel toggle; on desktop, it is used
+    /// by the pane-level details panel toggle.
     conversation_details_panel_toggle_mouse_state: warpui::elements::MouseStateHandle,
     /// Mouse state handle for the ambient agent cancel button in the pane header.
     ambient_agent_cancel_mouse_state: warpui::elements::MouseStateHandle,
@@ -4402,7 +4402,6 @@ impl TerminalView {
             has_auto_opened_conversation_details_panel: false,
             conversation_details_panel_auto_open_policy: Default::default(),
             pending_cloud_followup_task_id: None,
-            #[cfg(not(target_arch = "wasm32"))]
             conversation_details_panel_toggle_mouse_state: Default::default(),
             ambient_agent_cancel_mouse_state: Default::default(),
             active_init_project_model: None,
@@ -8049,6 +8048,55 @@ impl TerminalView {
     fn can_show_conversation_details_ui(&self, app: &AppContext) -> bool {
         let model = self.model.lock();
         self.can_show_conversation_details_ui_from_model(&model, app)
+    }
+
+    /// Whether the WASM workspace-level conversation details panel should be shown for this
+    /// terminal view. This is the authoritative predicate: `Workspace::should_show_conversation_details_panel`
+    /// delegates here. The `#[cfg(any(test, target_arch = "wasm32"))]` gate allows this logic
+    /// to be exercised by host-target unit tests even though the WASM render path is compiled out.
+    ///
+    /// Note: the pane-header `(i)` button uses a narrower gate
+    /// ([`Self::should_show_wasm_pane_header_details_button`]) that additionally excludes shared
+    /// sessions and transcript viewers, so it only appears on surfaces without a tab-bar
+    /// affordance. This predicate is intentionally broader so the panel renders for all three
+    /// surfaces.
+    ///
+    /// Returns `true` for:
+    /// - Restored ambient cloud tasks
+    /// - Conversation transcript viewers
+    /// - Shared sessions with an active conversation
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(crate) fn should_show_wasm_conversation_details_panel(&self, app: &AppContext) -> bool {
+        if self.ambient_agent_task_id_for_details_panel(app).is_some() {
+            return true;
+        }
+        let model = self.model.lock();
+        if model.is_conversation_transcript_viewer() {
+            return true;
+        }
+        if model.shared_session_status().is_sharer_or_viewer() {
+            drop(model);
+            return BlocklistAIHistoryModel::as_ref(app)
+                .active_conversation(self.view_id)
+                .is_some();
+        }
+        false
+    }
+
+    /// Whether the WASM pane-header `(i)` details toggle should be shown for this terminal view.
+    /// Narrower than [`Self::should_show_wasm_conversation_details_panel`]: the pane-header button
+    /// appears only on ambient-task panes that lack a tab-bar `(i)` affordance, so shared sessions
+    /// and conversation-transcript viewers — which already show the simplified WASM tab-bar `(i)`
+    /// via `get_simplified_wasm_tab_bar_content` — are excluded to avoid a duplicate button. The
+    /// `#[cfg(any(test, target_arch = "wasm32"))]` gate lets host-target unit tests exercise this
+    /// even though the render path is compiled out on the host.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(crate) fn should_show_wasm_pane_header_details_button(&self, app: &AppContext) -> bool {
+        let model = self.model.lock();
+        self.ambient_agent_task_id_for_details_panel_from_model(&model, app)
+            .is_some()
+            && !model.shared_session_status().is_sharer_or_viewer()
+            && !model.is_conversation_transcript_viewer()
     }
 
     /// Consume the one-shot conversation details panel auto-open for this

@@ -76,7 +76,7 @@ use warpui_core::{
     AppContext, Entity, EntityId, ModelHandle, TuiView, TypedActionView, ViewContext, ViewHandle,
 };
 
-use crate::agent_block::OUT_OF_CREDITS_URL;
+use crate::agent_block::upgrade_url;
 use crate::alt_screen_view::AltScreenElement;
 use crate::api_keys_menu::{TuiApiKeysMenuEvent, TuiApiKeysMenuModel, render_api_keys_footer};
 use crate::attachment_bar::{
@@ -4462,6 +4462,27 @@ impl TuiTerminalSessionView {
                 self.api_keys_menu.update(ctx, |menu, ctx| menu.open(ctx));
                 record_static_slash_command_accepted(command.name, true, ctx);
             }
+            SlashCommandKind::Upgrade => {
+                self.input_view.update(ctx, |input, ctx| input.clear(ctx));
+                ctx.open_url(&upgrade_url(ctx));
+                record_static_slash_command_accepted(command.name, true, ctx);
+            }
+            SlashCommandKind::ManageBilling => {
+                self.input_view.update(ctx, |input, ctx| input.clear(ctx));
+                let Some(url) = self
+                    .slash_commands_source
+                    .as_ref(ctx)
+                    .manage_billing_url(ctx)
+                else {
+                    self.show_error_hint(
+                        "Billing management is only available to team admins".to_owned(),
+                        ctx,
+                    );
+                    return;
+                };
+                ctx.open_url(&url);
+                record_static_slash_command_accepted(command.name, true, ctx);
+            }
             SlashCommandKind::Cost => {
                 self.input_view.update(ctx, |input, ctx| input.clear(ctx));
                 ctx.dispatch_typed_action_deferred(
@@ -5426,7 +5447,7 @@ impl TypedActionView for TuiTerminalSessionView {
     fn handle_action(&mut self, action: &TuiTerminalSessionAction, ctx: &mut ViewContext<Self>) {
         match action {
             TuiTerminalSessionAction::Interrupt => self.handle_interrupt(ctx),
-            TuiTerminalSessionAction::OpenOutOfCreditsUrl => ctx.open_url(OUT_OF_CREDITS_URL),
+            TuiTerminalSessionAction::OpenOutOfCreditsUrl => ctx.open_url(&upgrade_url(ctx)),
             TuiTerminalSessionAction::Eof => self.handle_eof(ctx),
             TuiTerminalSessionAction::CancelRestore => {
                 self.cancel_conversation_restore(ctx);

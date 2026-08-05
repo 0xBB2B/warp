@@ -55,6 +55,8 @@ pub enum SlashCommandKind {
     CloudAgent,
     AddMcp,
     ApiKeys,
+    Upgrade,
+    ManageBilling,
     AutoApprove,
     Statusline,
     ResetStatusline,

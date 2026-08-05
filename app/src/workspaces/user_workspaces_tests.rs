@@ -48,13 +48,13 @@ use crate::system::SystemStats;
 use crate::workflows::workflow::Workflow;
 use crate::workflows::{CloudWorkflow, CloudWorkflowModel};
 use crate::workspaces::gql_convert::PLACEHOLDER_WORKSPACE_UID;
-use crate::workspaces::team::Team;
+use crate::workspaces::team::{Team, TeamMember};
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
     AdminEnablementSetting, CodebaseContextSettings, HostEnablementSetting, LlmHostSettings,
-    PurchaseAddOnCreditsPolicy, Workspace,
+    MultiAdminPolicy, PurchaseAddOnCreditsPolicy, Workspace,
 };
 
 #[derive(Default)]
@@ -821,6 +821,138 @@ fn test_window_team_assignment_inherits_from_source_or_default_team() {
             assert_eq!(
                 user_workspaces.team_uid_for_window(fallback_window_id),
                 Some(first_team.uid)
+            );
+        });
+    })
+}
+
+#[test]
+fn warp_agent_cli_upgrade_link_is_channel_aware_and_user_bound() {
+    let user_uid = UserUid::new("user-123");
+
+    assert_eq!(
+        UserWorkspaces::warp_agent_cli_upgrade_link(Some(user_uid)),
+        format!(
+            "{}{STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX}/user/{user_uid}?source=warp-agent-cli",
+            ChannelState::server_root_url(),
+        )
+    );
+}
+
+#[test]
+fn warp_agent_cli_upgrade_link_uses_channel_aware_fallback_without_a_user() {
+    assert_eq!(
+        UserWorkspaces::warp_agent_cli_upgrade_link(None),
+        format!(
+            "{}{STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX}?source=warp-agent-cli",
+            ChannelState::server_root_url().trim_end_matches('/'),
+        )
+    );
+}
+
+#[test]
+fn admin_billing_link_for_default_team_targets_the_first_admin_team() {
+    let email = "admin@example.com";
+    let user_uid = UserUid::new("admin");
+    let mut first_team = team_for_test();
+    first_team.members.push(TeamMember {
+        uid: user_uid,
+        email: email.to_owned(),
+        role: MembershipRole::Owner,
+    });
+    let mut second_team = first_team.clone();
+    second_team.uid = 456.into();
+    let first_team_uid = first_team.uid;
+    let mut workspace = workspace_for_test(&first_team);
+    workspace.teams.push(second_team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            assert_eq!(
+                UserWorkspaces::as_ref(ctx).admin_billing_link_for_default_team(email),
+                Some(format!(
+                    "{}/admin/{first_team_uid}/billing",
+                    ChannelState::server_root_url().trim_end_matches('/'),
+                ))
+            );
+        });
+    })
+}
+
+#[test]
+fn admin_billing_link_for_default_team_accepts_admin_when_multi_admin_is_enabled() {
+    let email = "admin@example.com";
+    let user_uid = UserUid::new("admin");
+    let mut team = team_for_test();
+    team.billing_metadata.tier.multi_admin_policy = Some(MultiAdminPolicy { enabled: true });
+    team.members.push(TeamMember {
+        uid: user_uid,
+        email: email.to_owned(),
+        role: MembershipRole::Admin,
+    });
+    let team_uid = team.uid;
+    let workspace = workspace_for_test(&team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            assert_eq!(
+                UserWorkspaces::as_ref(ctx).admin_billing_link_for_default_team(email),
+                Some(format!(
+                    "{}/admin/{team_uid}/billing",
+                    ChannelState::server_root_url().trim_end_matches('/'),
+                ))
+            );
+        });
+    })
+}
+
+#[test]
+fn admin_billing_link_for_default_team_rejects_admin_without_multi_admin_policy() {
+    let email = "admin@example.com";
+    let user_uid = UserUid::new("admin");
+    let mut team = team_for_test();
+    team.members.push(TeamMember {
+        uid: user_uid,
+        email: email.to_owned(),
+        role: MembershipRole::Admin,
+    });
+    let workspace = workspace_for_test(&team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            assert_eq!(
+                UserWorkspaces::as_ref(ctx).admin_billing_link_for_default_team(email),
+                None
+            );
+        });
+    })
+}
+
+#[test]
+fn admin_billing_link_for_default_team_rejects_regular_members() {
+    let email = "member@example.com";
+    let user_uid = UserUid::new("member");
+    let mut team = team_for_test();
+    team.members.push(TeamMember {
+        uid: user_uid,
+        email: email.to_owned(),
+        role: MembershipRole::User,
+    });
+    let workspace = workspace_for_test(&team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        app.read(|ctx| {
+            assert_eq!(
+                UserWorkspaces::as_ref(ctx).admin_billing_link_for_default_team(email),
+                None
             );
         });
     })

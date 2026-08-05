@@ -1290,6 +1290,8 @@ impl Input {
             | SlashCommandKind::Statusline
             | SlashCommandKind::ResetStatusline
             | SlashCommandKind::ApiKeys
+            | SlashCommandKind::Upgrade
+            | SlashCommandKind::ManageBilling
             | SlashCommandKind::ViewLogs
             | SlashCommandKind::Voice
             | SlashCommandKind::NaturalLanguageDetection

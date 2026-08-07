@@ -6,9 +6,10 @@ use warp_errors::report_error;
 use warp_graphql::billing::{
     AiAutonomyPolicy as GqlAiAutonomyPolicy, AmbientAgentsPolicy as GqlAmbientAgentsPolicy,
     BillingCycleUsageHistory as GqlBillingCycleUsageHistory, BillingMetadata as GqlBillingMetadata,
-    BonusGrant as GqlBonusGrant, ByoApiKeyPolicy as GqlByoApiKeyPolicy,
-    ByoEndpointPolicy as GqlByoEndpointPolicy, CodebaseContextPolicy as GqlCodebaseContextPolicy,
-    CustomerType as GqlCustomerType, DelinquencyStatus as GqlDelinquencyStatus,
+    BonusGrant as GqlBonusGrant, BonusGrantScope as GqlBonusGrantScope,
+    ByoApiKeyPolicy as GqlByoApiKeyPolicy, ByoEndpointPolicy as GqlByoEndpointPolicy,
+    CodebaseContextPolicy as GqlCodebaseContextPolicy, CustomerType as GqlCustomerType,
+    DelinquencyStatus as GqlDelinquencyStatus,
     EnterpriseCreditsAutoReloadPolicy as GqlEnterpriseCreditsAutoReloadPolicy,
     EnterprisePayAsYouGoPolicy as GqlEnterprisePayAsYouGoPolicy, InstanceShape as GqlInstanceShape,
     ManagedByokByoePolicy as GqlManagedByokByoePolicy, MultiAdminPolicy as GqlMultiAdminPolicy,
@@ -82,7 +83,7 @@ use crate::workspaces::workspace::{
     AiOverages, BonusGrantsPurchased, ByoApiKeyPolicy, ByoEndpointPolicy, CodebaseContextPolicy,
     EnterpriseCreditsAutoReloadPolicy, EnterprisePayAsYouGoPolicy, ManagedByokByoePolicy,
     MultiAdminPolicy, NativeWorkspacesPolicy, PurchaseAddOnCreditsPolicy,
-    UsageBasedPricingSettings,
+    UsageBasedPricingSettings, WorkspaceUid,
 };
 
 pub const PLACEHOLDER_WORKSPACE_UID: &str = "NOT_A_REAL_WORKSPACE_UID";
@@ -689,8 +690,49 @@ impl From<GqlDelinquencyStatus> for DelinquencyStatus {
     }
 }
 
+fn bonus_grant_scope_from_gql(
+    scope: GqlBonusGrantScope,
+    workspace_uid: Option<WorkspaceUid>,
+) -> BonusGrantScope {
+    match (scope, workspace_uid) {
+        (GqlBonusGrantScope::User, _) => BonusGrantScope::User,
+        (GqlBonusGrantScope::Team, Some(uid)) => BonusGrantScope::Team(uid),
+        (GqlBonusGrantScope::Workspace, Some(uid)) => BonusGrantScope::Workspace(uid),
+        // A team/workspace-scoped grant is always fetched under a workspace, so a
+        // missing uid means an unexpected server shape; fall back to user scope.
+        (GqlBonusGrantScope::Team | GqlBonusGrantScope::Workspace, None) => {
+            report_error!(
+                anyhow!(
+                    "Team/Workspace-scoped bonus grant fetched without a workspace uid; treating as user scope"
+                ),
+                warp_errors::ReportErrorLogMode::OncePerRun
+            );
+            BonusGrantScope::User
+        }
+        // Unknown scope from a newer server: preserve the pre-scope behavior by
+        // attributing it to the workspace it was fetched under when available.
+        (GqlBonusGrantScope::Other, Some(uid)) => BonusGrantScope::Workspace(uid),
+        (GqlBonusGrantScope::Other, None) => BonusGrantScope::User,
+    }
+}
+
 impl BonusGrant {
-    pub fn from_gql_bonus_grant(bonus_grant: GqlBonusGrant, scope: BonusGrantScope) -> Self {
+    pub fn from_gql_user_bonus_grant(bonus_grant: GqlBonusGrant) -> Self {
+        Self::from_gql_bonus_grant(bonus_grant, None)
+    }
+
+    pub fn from_gql_workspace_or_team_bonus_grant(
+        bonus_grant: GqlBonusGrant,
+        workspace_uid: WorkspaceUid,
+    ) -> Self {
+        Self::from_gql_bonus_grant(bonus_grant, Some(workspace_uid))
+    }
+
+    fn from_gql_bonus_grant(
+        bonus_grant: GqlBonusGrant,
+        workspace_uid: Option<WorkspaceUid>,
+    ) -> Self {
+        let scope = bonus_grant_scope_from_gql(bonus_grant.scope, workspace_uid);
         Self {
             created_at: bonus_grant.created_at.utc(),
             cost_cents: bonus_grant.cost_cents,

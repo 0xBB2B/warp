@@ -2488,7 +2488,10 @@ impl TuiTerminalSessionView {
                     pill_kind,
                     total_pills: snapshot.children.len() + 1,
                     total_pinned: 0,
+                    // The TUI tab bar is root-anchored (no drill-down), so
+                    // the anchor and the tree root coincide.
                     source_conversation_id: snapshot.root_conversation_id,
+                    root_conversation_id: snapshot.root_conversation_id,
                     target_conversation_id: conversation_id,
                     switch_outcome: Some(PillSwitchOutcome::SwitchedInPlace),
                 }),
@@ -2558,7 +2561,10 @@ impl TuiTerminalSessionView {
                     pill_kind: PillBarPillKind::Child,
                     total_pills: snapshot.children.len() + 1,
                     total_pinned: 0,
+                    // The TUI tab bar is root-anchored (no drill-down), so
+                    // the anchor and the tree root coincide.
                     source_conversation_id: snapshot.root_conversation_id,
+                    root_conversation_id: snapshot.root_conversation_id,
                     target_conversation_id: conversation_id,
                     switch_outcome: None,
                 }),

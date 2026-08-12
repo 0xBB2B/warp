@@ -4894,11 +4894,11 @@ fn footer_usage_entry_is_hidden_until_the_conversation_reports_usage() {
 /// still renders the usage entry — `Cost unavailable` in cost mode, never
 /// `$0.00` — even when credits happen to be zero. Cost mode is only reachable
 /// while the credits⇄dollars toggle is enabled, so this exercises the
-/// `TuiCostTransparency`-on path.
+/// `PricingTransparency`-on path.
 #[test]
 fn footer_usage_entry_shows_unknown_cost_even_with_zero_credits() {
     App::test((), |mut app| async move {
-        let _cost_transparency = FeatureFlag::TuiCostTransparency.override_enabled(true);
+        let _cost_transparency = FeatureFlag::PricingTransparency.override_enabled(true);
         app.update(|ctx| {
             ctx.add_singleton_model(|_| Appearance::mock());
             let builder = TuiUiBuilder::from_app(ctx);

@@ -174,7 +174,11 @@ the signal:
   `Started` / `Lifecycle` signals for it become plain status updates.
 
 `TrackedChild` holds exactly what the state machine needs: `session_id`
-(`None` until execution is claimed), `last_state`, and `is_remote_child`.
+(`None` until execution is claimed), `last_state`, `is_remote_child`, and
+`last_lifecycle` (the most recent SSE lifecycle event type received for this
+child, if any). `last_lifecycle` is used by the placeholder-completion path to
+backfill terminal status when a lifecycle event arrives via SSE before the
+async metadata fetch creates the conversation in the history model.
 `ChildSpawned` is emitted exactly once per child, from `insert_child`.
 
 All tracker metadata fetches route through
@@ -299,10 +303,12 @@ from the server.
 `restore_missing_child_agent_panes_for_parent(parent_conversation_id,
 parent_pane_id, trigger_seed_if_empty, ctx)` runs when a parent agent view is
 restored or entered fullscreen. It reads the parent's children from
-`children_by_parent` and, when `trigger_seed_if_empty` is set and none of them
-are remote, kicks off the ancestor-list seed. The "none are remote" test rather
-than "the list is empty" matters: a parent with a mix of persisted local
-children and not-yet-discovered remote ones would otherwise never seed.
+`children_by_parent` and, when `trigger_seed_if_empty` is set and no seed is
+already pending for this parent in `pending_parent_child_seeds`, kicks off the
+ancestor-list seed. The seed is always triggered regardless of how many remote
+children are already known locally — some may be missing if the flag state
+changed between sessions (e.g. a child persisted under flag-off that is now
+missing flag-on siblings).
 
 `seed_child_conversations_from_task` records the parent in
 `pending_parent_child_seeds`, ensures the shared `TasksUpdated` subscription is

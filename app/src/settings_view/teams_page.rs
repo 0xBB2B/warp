@@ -78,7 +78,7 @@ use crate::workspaces::team::{DiscoverableTeam, MembershipRole, Team, TeamDelete
 use crate::workspaces::update_manager::{TeamUpdateManager, TeamUpdateManagerEvent};
 use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::{
-    BillingMetadata, CustomerType, DelinquencyStatus, WorkspaceSizePolicy,
+    BillingMetadata, CustomerType, DelinquencyStatus, Workspace, WorkspaceSizePolicy,
 };
 
 const TEAM_MEMBERS_HEADER_POSITION_ID: &str = "team_settings:team_members_header";
@@ -876,13 +876,17 @@ impl TeamsPageView {
     }
 
     fn open_member_actions_menu_for_item(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
-        let Some(team) = self.user_workspaces.as_ref(ctx).team_for_view(ctx) else {
+        let user_workspaces = self.user_workspaces.as_ref(ctx);
+        let Some(team) = user_workspaces.team_for_view(ctx) else {
+            return;
+        };
+        let Some(workspace) = user_workspaces.current_workspace() else {
             return;
         };
         let Some(current_user_email) = self.auth_state.user_email() else {
             return;
         };
-        let items = self.team_to_item_list(team, &current_user_email);
+        let items = Self::team_to_item_list(team, &current_user_email, workspace);
         let items_sorted = items.iter().sorted().collect_vec();
 
         let Some(item) = items_sorted.get(index) else {
@@ -1729,10 +1733,19 @@ impl TeamsPageView {
         ctx.notify();
     }
 
-    fn team_to_item_list(&self, team: &Team, current_user_email: &str) -> Vec<Item> {
+    fn team_to_item_list(
+        team: &Team,
+        current_user_email: &str,
+        workspace: &Workspace,
+    ) -> Vec<Item> {
         let mut combined = Vec::new();
         let current_user_has_admin_permissions = team.has_admin_permissions(current_user_email);
         let current_user_has_owner_permissions = team.has_owner_permissions(current_user_email);
+        // Admins of the team's native workspace can manage team membership roles even without
+        // an explicit team-admin role. Ownership transfer stays gated on team-owner permissions
+        // only, and is unaffected by this.
+        let current_user_can_manage_team_members = current_user_has_admin_permissions
+            || workspace.is_native_workspaces_admin(current_user_email);
 
         // pending email invites
         team.pending_email_invites.iter().for_each(|email_invite| {
@@ -1793,7 +1806,7 @@ impl TeamsPageView {
 
                 // Admins can promote and demote other admins
                 if team.is_multi_admin_enabled()
-                    && current_user_has_admin_permissions
+                    && current_user_can_manage_team_members
                     && !team_member_has_owner_permissions
                 {
                     if team_member_has_admin_permissions {
@@ -1820,7 +1833,7 @@ impl TeamsPageView {
                 }
 
                 // Admins can remove non-owner members
-                if current_user_has_admin_permissions && !team_member_has_owner_permissions {
+                if current_user_can_manage_team_members && !team_member_has_owner_permissions {
                     actions.push(ItemAction {
                         icon: Icon::X,
                         label: "Remove from team".to_string(),
@@ -2233,12 +2246,13 @@ impl TeamsWidget {
     fn render_team_management_page(
         &self,
         team_metadata: &Team,
-        cloud_model: &CloudModel,
-        ai_request_usage_model: &AIRequestUsageModel,
+        workspace: &Workspace,
         view: &TeamsPageView,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
+        let cloud_model = view.cloud_model.as_ref(app);
+        let ai_request_usage_model = view.ai_request_usage_model.as_ref(app);
         let current_user_email = view.auth_state.user_email().unwrap_or_default();
         let has_admin_permissions = team_metadata.has_admin_permissions(&current_user_email);
         let is_owner = team_metadata.has_owner_permissions(&current_user_email);
@@ -2255,9 +2269,7 @@ impl TeamsWidget {
             .set_border_color(appearance.theme().foreground().with_opacity(20).into())
             .set_padding(Coords::uniform(0.).top(4.).right(5.));
 
-        let use_workspace_admin_panel = UserWorkspaces::as_ref(app)
-            .current_workspace()
-            .is_some_and(|workspace| workspace.is_native_workspaces_admin(&current_user_email));
+        let use_workspace_admin_panel = workspace.is_native_workspaces_admin(&current_user_email);
 
         // 1) Team name header
         main_content.add_child(self.render_header(
@@ -2321,6 +2333,7 @@ impl TeamsWidget {
         // 5) Team members
         main_content.add_child(self.render_team_members_section(
             team_metadata,
+            workspace,
             &current_user_email,
             view,
             appearance,
@@ -2959,6 +2972,7 @@ impl TeamsWidget {
     fn render_team_members_section(
         &self,
         team: &Team,
+        workspace: &Workspace,
         user_email: &str,
         view: &TeamsPageView,
         appearance: &Appearance,
@@ -2983,7 +2997,7 @@ impl TeamsWidget {
 
         // 2) List of team members
         section.add_child(self.render_item_list(
-            view.team_to_item_list(team, user_email),
+            TeamsPageView::team_to_item_list(team, user_email, workspace),
             view.team_members_mouse_state_handles.clone(),
             view,
             appearance,
@@ -4426,18 +4440,16 @@ impl SettingsWidget for TeamsWidget {
         // related to team administration when offline.
         let content = if NetworkStatus::as_ref(app).is_online() {
             let teams = view.user_workspaces.as_ref(app);
-            let cloud_model = view.cloud_model.as_ref(app);
-            let ai_request_usage_model = view.ai_request_usage_model.as_ref(app);
 
-            match teams.team_for_view_handle(&view.self_handle, app) {
-                Some(team) => self.render_team_management_page(
-                    team,
-                    cloud_model,
-                    ai_request_usage_model,
-                    view,
-                    appearance,
-                    app,
-                ),
+            // A resolved team always lives in the current workspace, so both are
+            // present or the create-team page is shown.
+            match teams
+                .team_for_view_handle(&view.self_handle, app)
+                .zip(teams.current_workspace())
+            {
+                Some((team, workspace)) => {
+                    self.render_team_management_page(team, workspace, view, appearance, app)
+                }
                 None => self.render_create_team_page_with_banner(view, appearance, app),
             }
         } else {
@@ -4522,3 +4534,7 @@ pub fn test_owner_state_chip_text_contrasts_with_accent_overlay() {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "teams_page_tests.rs"]
+mod teams_page_tests;

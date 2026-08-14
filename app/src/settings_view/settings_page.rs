@@ -28,14 +28,16 @@ use warpui::{Action, AppContext, SingletonEntity, ViewContext, ViewHandle};
 
 use super::SettingsSection;
 use super::about_page::AboutPageView;
-use super::ai_page::{AISettingsPageAction, AISettingsPageView};
+use super::agent_profiles_page::AgentProfilesPageView;
 use super::appearance_page::AppearanceSettingsPageView;
 use super::billing_and_usage_dispatch::BillingAndUsageDispatchView;
+use super::cli_agents_page::CLIAgentsPageView;
 use super::code_editor_review_page::EditorAndCodeReviewPageView;
 use super::code_indexing_page::CodeIndexingPageView;
 use super::environments_page::EnvironmentsPageView;
 use super::features_page::FeaturesPageView;
 use super::keybindings::KeybindingsView;
+use super::knowledge_page::KnowledgePageView;
 use super::main_page::MainSettingsPageView;
 use super::mcp_servers_page::MCPServersSettingsPageView;
 use super::privacy_page::PrivacyPageView;
@@ -43,6 +45,7 @@ use super::referrals_page::ReferralsPageView;
 use super::scripting_page::ScriptingSettingsPageView;
 use super::show_blocks_view::ShowBlocksView;
 use super::teams_page::TeamsPageView;
+use super::warp_agent_page::WarpAgentPageView;
 use super::warp_drive_page::WarpDriveSettingsPageView;
 use super::warpify_page::WarpifyPageView;
 use crate::appearance::Appearance;
@@ -117,7 +120,10 @@ pub enum SettingsPageViewHandle {
     Warpify(ViewHandle<WarpifyPageView>),
     Referrals(ViewHandle<ReferralsPageView>),
     Scripting(ViewHandle<ScriptingSettingsPageView>),
-    AI(ViewHandle<AISettingsPageView>),
+    WarpAgent(ViewHandle<WarpAgentPageView>),
+    AgentProfiles(ViewHandle<AgentProfilesPageView>),
+    Knowledge(ViewHandle<KnowledgePageView>),
+    CLIAgents(ViewHandle<CLIAgentsPageView>),
     CloudEnvironments(ViewHandle<EnvironmentsPageView>),
     BillingAndUsage(ViewHandle<BillingAndUsageDispatchView>),
     MCPServers(ViewHandle<MCPServersSettingsPageView>),
@@ -142,7 +148,10 @@ impl SettingsPageViewHandle {
             Warpify(view_handle) => ChildView::new(view_handle).finish(),
             Referrals(view_handle) => ChildView::new(view_handle).finish(),
             Scripting(view_handle) => ChildView::new(view_handle).finish(),
-            AI(view_handle) => ChildView::new(view_handle).finish(),
+            WarpAgent(view_handle) => ChildView::new(view_handle).finish(),
+            AgentProfiles(view_handle) => ChildView::new(view_handle).finish(),
+            Knowledge(view_handle) => ChildView::new(view_handle).finish(),
+            CLIAgents(view_handle) => ChildView::new(view_handle).finish(),
             CloudEnvironments(view_handle) => ChildView::new(view_handle).finish(),
             BillingAndUsage(view_handle) => ChildView::new(view_handle).finish(),
             MCPServers(view_handle) => ChildView::new(view_handle).finish(),
@@ -393,7 +402,7 @@ pub fn render_full_pane_width_ai_button(
     text: &str,
     is_any_ai_enabled: bool,
     mouse_state: MouseStateHandle,
-    action: AISettingsPageAction,
+    action: impl Action + Clone,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
     let (text_color, bg, icon_bg) = if is_any_ai_enabled {

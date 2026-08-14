@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 
+use instant::Instant;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use markdown_parser::FormattedTextFragment;
@@ -31,6 +32,7 @@ use warp_terminal::shell::{ShellName, ShellType};
 use warp_util::path::LineAndColumnArg;
 use warp_util::path::convert_wsl_to_windows_host_path;
 use warp_util::remote_path::RemotePath;
+use warpui::r#async::SpawnedFutureHandle;
 use warpui::elements::{
     ChildView, Clipped, CrossAxisAlignment, DispatchEventResult, Element, EventHandler, Flex,
     MainAxisSize, ParentElement, Shrinkable, Stack,
@@ -960,7 +962,13 @@ pub struct PaneGroup {
     /// fully materialized as local child conversations, keyed by the parent's
     /// run id. Re-driven from the shared `TasksUpdated` subscription until
     /// every child in the server-reported list has a local conversation.
-    pending_parent_child_seeds: HashMap<AmbientAgentTaskId, AIConversationId>,
+    pending_parent_child_seeds: HashMap<AmbientAgentTaskId, PendingParentChildSeed>,
+
+    /// Test-only: counts `spawn_ancestor_list_fetch_if_needed` dispatches, so
+    /// tests can assert that a burst of `TasksUpdated` re-drives coalesces
+    /// into a single ancestor-list fetch instead of one per event.
+    #[cfg(test)]
+    parent_child_seed_fetch_dispatch_count: usize,
 
     /// The most recent live session that failed to join for each viewer child.
     /// Re-drive does not retry the same session, but a later execution with a
@@ -987,6 +995,26 @@ pub struct PaneGroup {
 
     /// Tab-level custom title set via the rename-tab flow.
     custom_title: Option<String>,
+}
+
+/// A cloud orchestration parent whose direct children (per the server's
+/// `?ancestor_run_id=` listing) have not yet all materialized as local child
+/// conversations.
+struct PendingParentChildSeed {
+    parent_conversation_id: AIConversationId,
+    /// True while an ancestor-list fetch for this parent is outstanding, so
+    /// a second, overlapping request for the same parent is never dispatched.
+    fetch_in_flight: bool,
+    /// When the currently in-flight fetch (if any) was dispatched. Compared
+    /// against the value captured at dispatch time before a completion is
+    /// applied, so a completion for a seed that was removed and recreated
+    /// for the same `parent_task_id` while the old fetch was still in
+    /// flight can't clobber the new seed's state or feed it stale results.
+    in_flight_fetch_started_at: Option<Instant>,
+    /// Handle for a scheduled one-shot retry after a transient fetch
+    /// failure, so a transient error can't silently strand the parent
+    /// pending forever without ever linking its children.
+    retry_handle: Option<SpawnedFutureHandle>,
 }
 
 /// Origin metadata for a split-off child agent tab; used to re-adopt the
@@ -3187,6 +3215,8 @@ impl PaneGroup {
             pending_remote_child_hydrations: HashMap::new(),
             pending_child_hydrations: HashMap::new(),
             pending_parent_child_seeds: HashMap::new(),
+            #[cfg(test)]
+            parent_child_seed_fetch_dispatch_count: 0,
             failed_viewer_child_sessions: HashMap::new(),
             pending_ambient_restoration_subscription_installed: false,
             child_agent_panes: HashMap::new(),
@@ -4663,13 +4693,21 @@ impl PaneGroup {
             self.panes.remove_hidden_pane(child_pane_id);
             self.discard_pane(child_pane_id, ctx);
         }
-        // Drop any pending parent seed associated with the view being removed
-        // so the re-drive subscription doesn't fire for a closed pane.
-        self.pending_parent_child_seeds.retain(|_, parent_conv_id| {
-            BlocklistAIHistoryModel::as_ref(ctx)
-                .terminal_surface_id_for_conversation(parent_conv_id)
-                .is_some_and(|tv_id| tv_id != parent_terminal_view_id)
-        });
+        // Drop any pending parent seed for the view being removed, aborting
+        // its retry timer so it can't fire after the pane is gone.
+        let parent_task_ids_to_remove: Vec<AmbientAgentTaskId> = self
+            .pending_parent_child_seeds
+            .iter()
+            .filter(|(_, seed)| {
+                BlocklistAIHistoryModel::as_ref(ctx)
+                    .terminal_surface_id_for_conversation(&seed.parent_conversation_id)
+                    .is_some_and(|tv_id| tv_id == parent_terminal_view_id)
+            })
+            .map(|(parent_task_id, _)| *parent_task_id)
+            .collect();
+        for parent_task_id in parent_task_ids_to_remove {
+            self.remove_pending_parent_child_seed(parent_task_id);
+        }
     }
 
     /// Permanently discards the pane backing a child agent conversation.

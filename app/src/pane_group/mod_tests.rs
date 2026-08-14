@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
 use ai::project_context::model::ProjectContextModel;
 use chrono::Utc;
+use instant::Instant;
 use pathfinder_geometry::rect::RectF;
 use persistence::model::{
     AgentConversation, AgentConversationData, AgentConversationRecord, ConversationUsageMetadata,
@@ -22,6 +24,7 @@ use warpui::windowing::state::ApplicationStage;
 use warpui::{App, ModelHandle};
 use watcher::HomeDirectoryWatcher;
 
+use super::child_agent::restoration::is_stale_ancestor_list_completion;
 use super::child_agent::{
     HiddenChildAgentConversationRequest, HiddenChildAgentTaskContext,
     create_hidden_child_agent_conversation,
@@ -74,6 +77,7 @@ use crate::server::cloud_objects::listener::Listener;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
+use crate::server::server_api::presigned_upload::HttpStatusError;
 use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings::PrivacySettings;
@@ -1498,6 +1502,350 @@ fn test_pane_group_restore_loop_keeps_orchestration_topology_and_materializes_ch
             assert!(
                 !panes.panes.is_pane_in_tree(child_pane_id),
                 "materialized child pane must remain off-tree (hidden)",
+            );
+        });
+    });
+}
+
+/// A concurrent seed call racing a re-drive must not dispatch a second
+/// `?ancestor_run_id=` request for the same parent while the first is
+/// still in flight.
+#[test]
+fn seed_child_conversations_from_task_coalesces_concurrent_ancestor_list_fetches() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let parent_task_id = new_ambient_agent_task_id();
+
+            // Simulate multiple entry points trying to seed the same parent
+            // before its first ancestor-list fetch has resolved: a direct
+            // re-entrant call, plus two `TasksUpdated` re-drives.
+            panes.seed_child_conversations_from_task(parent_conversation_id, parent_task_id, ctx);
+            panes.seed_child_conversations_from_task(parent_conversation_id, parent_task_id, ctx);
+            panes.process_pending_parent_child_seeds(ctx);
+            panes.process_pending_parent_child_seeds(ctx);
+
+            assert_eq!(
+                panes.parent_child_seed_fetch_dispatch_count, 1,
+                "a parent with an ancestor-list fetch already in flight must not get a second \
+                 request dispatched by a concurrent seed call or TasksUpdated re-drive",
+            );
+            assert!(
+                panes
+                    .pending_parent_child_seeds
+                    .contains_key(&parent_task_id),
+                "the parent should remain pending until the in-flight fetch resolves",
+            );
+        });
+    });
+}
+
+/// Drives the real completion handler with a synthetic successful response
+/// whose only child is already cached. Both the child link and the
+/// pending-entry removal must happen with zero additional network dispatches.
+#[test]
+fn finish_seed_child_conversations_from_task_links_children_and_clears_pending_once_resolved() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let parent_task_id = new_ambient_agent_task_id();
+            let child_task_id = new_ambient_agent_task_id();
+
+            // Seed the child's task data directly so `get_or_async_fetch_task_data`
+            // resolves from cache instead of issuing a network call.
+            AgentConversationsModel::handle(ctx).update(ctx, |model, _| {
+                model.insert_task_for_test(ambient_agent_task_for_current_user(child_task_id));
+            });
+
+            // Mark pending the way `seed_child_conversations_from_task` does,
+            // then drive the completion handler directly with a synthetic
+            // response reporting one direct child.
+            panes.seed_child_conversations_from_task(parent_conversation_id, parent_task_id, ctx);
+            // The real completion callback clears `fetch_in_flight` before
+            // calling `finish_seed_child_conversations_from_task`; mirror
+            // that here since this test drives the completion handler
+            // directly, bypassing the wrapper.
+            panes
+                .pending_parent_child_seeds
+                .get_mut(&parent_task_id)
+                .unwrap()
+                .fetch_in_flight = false;
+            let response = vec![ambient_agent_task_for_current_user(child_task_id)];
+            panes.finish_seed_child_conversations_from_task(
+                parent_conversation_id,
+                parent_task_id,
+                Ok(response),
+                ctx,
+            );
+
+            assert!(
+                !panes
+                    .pending_parent_child_seeds
+                    .contains_key(&parent_task_id),
+                "the parent must be cleared once its only known child has resolved locally",
+            );
+
+            let history = BlocklistAIHistoryModel::as_ref(ctx);
+            assert_eq!(
+                history
+                    .child_conversation_ids_of(&parent_conversation_id)
+                    .len(),
+                1,
+                "the known child must be linked under the parent",
+            );
+        });
+    });
+}
+
+/// While any reported child hasn't resolved from the local task cache yet,
+/// the parent must stay pending (not be dropped) so a subsequent re-drive
+/// still re-lists and can pick up a child spawned in the interim; clearing
+/// early would stop discovering such children. Only once every currently
+/// reported child resolves does the parent clear.
+#[test]
+fn finish_seed_child_conversations_from_task_stays_pending_while_a_child_is_unresolved() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let parent_task_id = new_ambient_agent_task_id();
+            let unresolved_child_task_id = new_ambient_agent_task_id();
+
+            // Deliberately do NOT insert the child's task data, so
+            // `get_or_async_fetch_task_data` returns `None` for it.
+            panes.seed_child_conversations_from_task(parent_conversation_id, parent_task_id, ctx);
+            let response = vec![ambient_agent_task_for_current_user(
+                unresolved_child_task_id,
+            )];
+            panes.finish_seed_child_conversations_from_task(
+                parent_conversation_id,
+                parent_task_id,
+                Ok(response),
+                ctx,
+            );
+
+            assert!(
+                panes
+                    .pending_parent_child_seeds
+                    .contains_key(&parent_task_id),
+                "the parent must remain pending while a reported child hasn't resolved yet, so \
+                 the next TasksUpdated re-drive still re-lists",
+            );
+
+            // The real completion callback (in `spawn_ancestor_list_fetch_if_needed`)
+            // clears `fetch_in_flight` before calling
+            // `finish_seed_child_conversations_from_task`; mirror that here
+            // since this test drives the completion handler directly.
+            panes
+                .pending_parent_child_seeds
+                .get_mut(&parent_task_id)
+                .unwrap()
+                .fetch_in_flight = false;
+
+            // A subsequent TasksUpdated re-drive must actually re-list (not
+            // silently no-op) now that the previous fetch has completed.
+            let dispatch_count_before = panes.parent_child_seed_fetch_dispatch_count;
+            panes.process_pending_parent_child_seeds(ctx);
+            assert_eq!(
+                panes.parent_child_seed_fetch_dispatch_count,
+                dispatch_count_before + 1,
+                "an unresolved parent must be re-listed on the next TasksUpdated re-drive",
+            );
+        });
+    });
+}
+
+/// A transient ancestor-list failure (e.g. a network blip) must not leave
+/// the parent stranded waiting on an incidental external event that may
+/// never come (e.g. an idle completed conversation) — a one-shot retry
+/// must be scheduled so the fetch is retried on its own.
+#[test]
+fn finish_seed_child_conversations_from_task_schedules_retry_on_transient_failure() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let parent_task_id = new_ambient_agent_task_id();
+
+            panes.seed_child_conversations_from_task(parent_conversation_id, parent_task_id, ctx);
+            // Mirror the real completion callback's `fetch_in_flight` reset,
+            // since this test drives the completion handler directly.
+            panes
+                .pending_parent_child_seeds
+                .get_mut(&parent_task_id)
+                .unwrap()
+                .fetch_in_flight = false;
+            // No `HttpStatusError` in the chain => classified as transient by
+            // `is_transient_http_error` (network-level failure).
+            panes.finish_seed_child_conversations_from_task(
+                parent_conversation_id,
+                parent_task_id,
+                Err(anyhow::anyhow!("connection reset")),
+                ctx,
+            );
+
+            let seed = panes
+                .pending_parent_child_seeds
+                .get(&parent_task_id)
+                .expect("a transient failure must leave the parent pending for a retry");
+            assert!(
+                !seed.fetch_in_flight,
+                "the completion path must not leave fetch_in_flight stuck true after handling \
+                 a transient failure",
+            );
+            assert!(
+                seed.retry_handle.is_some(),
+                "a transient failure must schedule a guaranteed one-shot retry instead of \
+                 relying on an incidental TasksUpdated, so no subsequent external event is \
+                 needed for the parent to eventually link its children",
+            );
+        });
+    });
+}
+
+/// If a pending seed is removed (e.g. its pane closes) and a new one
+/// created for the same `parent_task_id` while the old fetch is still in
+/// flight (e.g. the same parent conversation is reopened), the old
+/// completion must be recognized as stale so it can't clobber the new
+/// seed's in-flight state or feed it stale results.
+#[test]
+fn stale_ancestor_list_completion_is_detected_when_seed_removed_or_recreated() {
+    let dispatched_at = Instant::now();
+    let live_seed = PendingParentChildSeed {
+        parent_conversation_id: AIConversationId::new(),
+        fetch_in_flight: true,
+        in_flight_fetch_started_at: Some(dispatched_at),
+        retry_handle: None,
+    };
+    assert!(
+        !is_stale_ancestor_list_completion(Some(&live_seed), dispatched_at),
+        "a completion matching the seed's own in-flight dispatch marker must not be stale",
+    );
+
+    assert!(
+        is_stale_ancestor_list_completion(None, dispatched_at),
+        "a completion for a seed that was removed entirely (e.g. pane closed) must be stale",
+    );
+
+    // A later dispatch on a recreated seed (e.g. the same parent conversation
+    // reopened while the old fetch was still in flight) has a distinct
+    // dispatch marker.
+    let recreated_seed = PendingParentChildSeed {
+        parent_conversation_id: AIConversationId::new(),
+        fetch_in_flight: true,
+        in_flight_fetch_started_at: Some(dispatched_at + Duration::from_secs(1)),
+        retry_handle: None,
+    };
+    assert!(
+        is_stale_ancestor_list_completion(Some(&recreated_seed), dispatched_at),
+        "a completion whose dispatch marker doesn't match the current seed's must be stale, \
+         since a newer fetch has since been dispatched for the same parent_task_id",
+    );
+}
+
+/// A permanent (non-transient) ancestor-list failure such as a 404/403
+/// can't succeed by retrying blindly, so the parent must be dropped
+/// instead of staying pending forever.
+#[test]
+fn finish_seed_child_conversations_from_task_gives_up_on_permanent_failure() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            let parent_conversation_id = start_parent_conversation(panes, parent_pane_id, ctx);
+            let parent_task_id = new_ambient_agent_task_id();
+
+            panes.seed_child_conversations_from_task(parent_conversation_id, parent_task_id, ctx);
+            let err = anyhow::Error::new(HttpStatusError {
+                status: 404,
+                body: String::new(),
+            });
+            panes.finish_seed_child_conversations_from_task(
+                parent_conversation_id,
+                parent_task_id,
+                Err(err),
+                ctx,
+            );
+
+            assert!(
+                !panes
+                    .pending_parent_child_seeds
+                    .contains_key(&parent_task_id),
+                "a permanent failure can't succeed by retrying blindly, so the parent must be \
+                 dropped instead of staying pending forever",
+            );
+        });
+    });
+}
+
+/// A parent with no terminal surface to seed into (e.g. a background
+/// ancestor several levels above the conversation the user actually
+/// opened) must not stay pending forever, since that would re-list it on
+/// every future re-drive indefinitely.
+#[test]
+fn finish_seed_child_conversations_from_task_gives_up_when_parent_has_no_terminal_surface() {
+    let _unified_stack = FeatureFlag::OrchestrationUnifiedStack.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            // Never attached via `start_new_conversation` / `restore_conversations`,
+            // so it has no terminal surface.
+            let orphan_parent_conversation_id = AIConversationId::new();
+            let parent_task_id = new_ambient_agent_task_id();
+            let child_task_id = new_ambient_agent_task_id();
+
+            // Mark pending directly (bypassing `seed_child_conversations_from_task`,
+            // which would spawn a real network fetch) then drive the real
+            // completion handler, so the test exercises the actual
+            // no-terminal-surface early return instead of asserting against
+            // fabricated state.
+            panes.pending_parent_child_seeds.insert(
+                parent_task_id,
+                PendingParentChildSeed {
+                    parent_conversation_id: orphan_parent_conversation_id,
+                    fetch_in_flight: true,
+                    in_flight_fetch_started_at: None,
+                    retry_handle: None,
+                },
+            );
+
+            let response = vec![ambient_agent_task_for_current_user(child_task_id)];
+            panes.finish_seed_child_conversations_from_task(
+                orphan_parent_conversation_id,
+                parent_task_id,
+                Ok(response),
+                ctx,
+            );
+
+            assert!(
+                !panes
+                    .pending_parent_child_seeds
+                    .contains_key(&parent_task_id),
+                "a parent with no terminal surface to seed into must not stay pending forever \
+                 and be re-listed on every future re-drive",
             );
         });
     });

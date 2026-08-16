@@ -48,7 +48,6 @@ use crate::auth::auth_manager::{AuthManager, LoginGatedFeature};
 use crate::auth::auth_state::AuthState;
 use crate::auth::auth_view_modal::AuthViewVariant;
 use crate::auth::{AuthStateProvider, UserUid};
-use crate::channel::ChannelState;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObjectEventEntrypoint, Space};
 use crate::drive::cloud_action_confirmation_dialog::{
@@ -108,7 +107,6 @@ const SUBSECTION_HEADER_FONT_SIZE: f32 = 18.;
 const SUBSUBSECTION_HEADER_FONT_SIZE: f32 = 14.;
 const OWNER_STATE_CHIP_ACCENT_OPACITY: u8 = 30;
 
-const INVITE_LINK_PREFIX: &str = "/team/";
 const INVALID_DOMAINS_INSTRUCTIONS: &str =
     "Some of the provided domains are invalid, or have already been added.";
 
@@ -1721,14 +1719,12 @@ impl TeamsPageView {
     fn focus_on_next_input(&mut self, ctx: &mut ViewContext<Self>) {
         let workspaces: &UserWorkspaces = self.user_workspaces.as_ref(ctx);
 
-        if workspaces.team_for_view(ctx).is_some() {
-            if workspaces.is_invite_link_enabled() {
+        match workspaces.team_for_view(ctx) {
+            Some(team) if team.invite_link.is_some() => {
                 ctx.focus(&self.approve_domains_block_editor);
-            } else {
-                ctx.focus(&self.email_invites_block_editor);
             }
-        } else {
-            ctx.focus(&self.create_team_editor);
+            Some(_) => ctx.focus(&self.email_invites_block_editor),
+            None => ctx.focus(&self.create_team_editor),
         }
         ctx.notify();
     }
@@ -2709,10 +2705,8 @@ impl TeamsWidget {
     ) -> Box<dyn Element> {
         let mut invitation_section = Flex::column();
 
-        // Invite-link enablement and discoverability are workspace-level settings,
-        // read from the current workspace rather than the Team struct.
         let user_workspaces = UserWorkspaces::as_ref(app);
-        let is_invite_link_enabled = user_workspaces.is_invite_link_enabled();
+        let is_invite_link_enabled = team_metadata.invite_link.is_some();
         let is_discoverable = user_workspaces.is_discoverable();
 
         // "team is full" or "billing issue" or some other alert thats restricting you from adding team members
@@ -3746,16 +3740,8 @@ impl TeamsWidget {
     ) -> Box<dyn Element> {
         let mut section = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-        let (link_text, button_enabled) = match &team_metadata.invite_code {
-            Some(invite_code) => {
-                let link = format!(
-                    "{}{}{}",
-                    ChannelState::server_root_url(),
-                    INVITE_LINK_PREFIX,
-                    invite_code.code
-                );
-                (link, true)
-            }
+        let (link_text, button_enabled) = match &team_metadata.invite_link {
+            Some(invite_link) => (invite_link.clone(), true),
             None => ("Failed to load invite link.".into(), false),
         };
         let theme = appearance.theme();

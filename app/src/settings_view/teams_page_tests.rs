@@ -160,7 +160,7 @@ fn workspace_admin_without_team_role_can_promote_demote_and_remove() {
 }
 
 #[test]
-fn workspace_admin_without_native_workspaces_policy_gets_no_member_actions() {
+fn workspace_admin_without_native_workspaces_policy_can_manage_members() {
     let team = team_with_members(
         vec![
             member(MEMBER_EMAIL, MembershipRole::User),
@@ -172,8 +172,10 @@ fn workspace_admin_without_native_workspaces_policy_gets_no_member_actions() {
 
     let items = TeamsPageView::team_to_item_list(&team, MEMBER_EMAIL, &workspace);
 
-    // The override only applies to admins of native workspaces.
-    assert!(action_labels(&items, "other@example.com").is_empty());
+    assert_eq!(
+        action_labels(&items, "other@example.com"),
+        vec!["Promote to admin", "Remove from team"]
+    );
 }
 
 #[test]
@@ -231,7 +233,7 @@ fn current_user_gets_no_actions_against_their_own_row_as_workspace_admin() {
 }
 
 #[test]
-fn workspace_admin_does_not_get_pending_invite_cancellation() {
+fn workspace_admin_can_cancel_pending_invite() {
     let mut team = team_with_members(vec![member(MEMBER_EMAIL, MembershipRole::User)], true);
     team.pending_email_invites.push(EmailInvite {
         invitee_email: "invitee@example.com".to_string(),
@@ -241,7 +243,8 @@ fn workspace_admin_does_not_get_pending_invite_cancellation() {
 
     let items = TeamsPageView::team_to_item_list(&team, MEMBER_EMAIL, &workspace);
 
-    // Cancelling a pending invite remains gated on team-admin permissions;
-    // it's out of scope for the workspace-admin override.
-    assert!(action_labels(&items, "invitee@example.com").is_empty());
+    assert_eq!(
+        action_labels(&items, "invitee@example.com"),
+        vec!["Cancel invite"]
+    );
 }

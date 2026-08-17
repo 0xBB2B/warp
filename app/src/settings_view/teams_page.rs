@@ -382,6 +382,8 @@ enum ItemState {
     Pending,
     Owner,
     Admin,
+    WorkspaceOwner,
+    WorkspaceAdmin,
     Valid,
 }
 
@@ -1735,13 +1737,9 @@ impl TeamsPageView {
         workspace: &Workspace,
     ) -> Vec<Item> {
         let mut combined = Vec::new();
-        let current_user_has_admin_permissions = team.has_admin_permissions(current_user_email);
+        let current_user_has_admin_permissions = team.has_admin_permissions(current_user_email)
+            || workspace.is_workspace_admin(current_user_email);
         let current_user_has_owner_permissions = team.has_owner_permissions(current_user_email);
-        // Admins of the team's native workspace can manage team membership roles even without
-        // an explicit team-admin role. Ownership transfer stays gated on team-owner permissions
-        // only, and is unaffected by this.
-        let current_user_can_manage_team_members = current_user_has_admin_permissions
-            || workspace.is_native_workspaces_admin(current_user_email);
 
         // pending email invites
         team.pending_email_invites.iter().for_each(|email_invite| {
@@ -1775,13 +1773,22 @@ impl TeamsPageView {
         team.members.iter().for_each(|member| {
             let team_member_has_owner_permissions = team.has_owner_permissions(&member.email);
             let team_member_has_admin_permissions = team.has_admin_permissions(&member.email);
+            let member_workspace_role = workspace
+                .members
+                .iter()
+                .find(|workspace_member| workspace_member.email == member.email)
+                .map(|workspace_member| workspace_member.role);
 
             let state = if team_member_has_owner_permissions {
                 ItemState::Owner
             } else if team_member_has_admin_permissions {
                 ItemState::Admin
             } else {
-                ItemState::Valid
+                match member_workspace_role {
+                    Some(MembershipRole::Owner) => ItemState::WorkspaceOwner,
+                    Some(MembershipRole::Admin) => ItemState::WorkspaceAdmin,
+                    _ => ItemState::Valid,
+                }
             };
 
             let mut actions = Vec::new();
@@ -1802,7 +1809,7 @@ impl TeamsPageView {
 
                 // Admins can promote and demote other admins
                 if team.is_multi_admin_enabled()
-                    && current_user_can_manage_team_members
+                    && current_user_has_admin_permissions
                     && !team_member_has_owner_permissions
                 {
                     if team_member_has_admin_permissions {
@@ -1829,7 +1836,7 @@ impl TeamsPageView {
                 }
 
                 // Admins can remove non-owner members
-                if current_user_can_manage_team_members && !team_member_has_owner_permissions {
+                if current_user_has_admin_permissions && !team_member_has_owner_permissions {
                     actions.push(ItemAction {
                         icon: Icon::X,
                         label: "Remove from team".to_string(),
@@ -3570,6 +3577,42 @@ impl TeamsWidget {
                                 *EMAIL_INVITE_PENDING_COLOR,
                                 themes::theme::Fill::from(*EMAIL_INVITE_PENDING_COLOR)
                                     .with_opacity(30)
+                                    .into(),
+                                appearance.ui_font_size() - 1.,
+                                Weight::Normal,
+                            ),
+                        );
+                    }
+                    ItemState::WorkspaceOwner => {
+                        pending_and_close_row.add_child(
+                            self.render_state_chip(
+                                appearance,
+                                "WORKSPACE OWNER".into(),
+                                owner_state_chip_text_color(appearance.theme()),
+                                appearance
+                                    .theme()
+                                    .accent()
+                                    .with_opacity(OWNER_STATE_CHIP_ACCENT_OPACITY)
+                                    .into(),
+                                appearance.ui_font_size() - 1.,
+                                Weight::Normal,
+                            ),
+                        );
+                    }
+                    ItemState::WorkspaceAdmin => {
+                        pending_and_close_row.add_child(
+                            self.render_state_chip(
+                                appearance,
+                                "WORKSPACE ADMIN".into(),
+                                appearance
+                                    .theme()
+                                    .background()
+                                    .blend(&appearance.theme().foreground().with_opacity(60))
+                                    .into(),
+                                appearance
+                                    .theme()
+                                    .background()
+                                    .blend(&appearance.theme().foreground().with_opacity(25))
                                     .into(),
                                 appearance.ui_font_size() - 1.,
                                 Weight::Normal,

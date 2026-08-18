@@ -193,6 +193,37 @@ const LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV: &str =
     "OZ_PARENT_LISTENER_MANAGED_EXTERNALLY";
 const LEGACY_OZ_PARENT_STATE_ROOT_ENV: &str = "OZ_PARENT_STATE_ROOT";
 
+/// Fixed namespace for [`ephemeral_mcp_installation_id`]. Arbitrary; never reused.
+const EPHEMERAL_MCP_INSTALLATION_NAMESPACE: Uuid = Uuid::from_bytes([
+    0xf9, 0x79, 0x1a, 0x88, 0xff, 0xb7, 0x41, 0x88, 0xa6, 0x39, 0xa7, 0x2d, 0xf2, 0x94, 0x22, 0x3f,
+]);
+
+/// Installation id for an ephemeral MCP server (well-known sentinel or non-local
+/// managed MCP UUID) resolved from a managed MCP client config.
+///
+/// With `task_id` (ambient/cloud runs), the id is deterministic: hashing run id +
+/// spec token + server name means a rebuilt sandbox re-resolves the same server to
+/// the same id. Ids can persist in the model's conversation history across a
+/// rebuild; a random id would go stale and fail as "MCP server not found".
+///
+/// Without `task_id` (local sessions; no rebuilds), ids stay random: hashing only
+/// the spec token would collide across concurrent conversations in the same
+/// process, since `TemplatableMCPServerManager` keys installations by this id
+/// process-wide.
+fn ephemeral_mcp_installation_id(
+    task_id: Option<AmbientAgentTaskId>,
+    spec_token: &str,
+    server_name: &str,
+) -> Uuid {
+    match task_id {
+        Some(task_id) => Uuid::new_v5(
+            &EPHEMERAL_MCP_INSTALLATION_NAMESPACE,
+            format!("{task_id}:{spec_token}:{server_name}").as_bytes(),
+        ),
+        None => Uuid::new_v4(),
+    }
+}
+
 /// IdleTimeoutSender is wrapper around a sender that signals when a run is done after
 /// an idle timeout. Used for both Oz runs and third-party harnesses.
 ///
@@ -1380,24 +1411,31 @@ impl AgentDriver {
         managed_mcp_client: Arc<dyn ManagedMcpClient>,
         foreground: &ModelSpawner<Self>,
     ) -> Result<ResolvedMcpSpecs, AgentDriverError> {
-        let local_installed_uuids = foreground
-            .spawn(|_, ctx| {
-                TemplatableMCPServerManager::as_ref(ctx)
+        let (local_installed_uuids, task_id) = foreground
+            .spawn(|me, ctx| {
+                let local_installed_uuids = TemplatableMCPServerManager::as_ref(ctx)
                     .get_installed_templatable_servers()
                     .keys()
                     .copied()
-                    .collect::<HashSet<_>>()
+                    .collect::<HashSet<_>>();
+                (local_installed_uuids, me.task_id)
             })
             .await?;
 
-        Self::resolve_mcp_specs_with_local_uuids(specs, &local_installed_uuids, managed_mcp_client)
-            .await
+        Self::resolve_mcp_specs_with_local_uuids(
+            specs,
+            &local_installed_uuids,
+            managed_mcp_client,
+            task_id,
+        )
+        .await
     }
 
     async fn resolve_mcp_specs_with_local_uuids(
         specs: &[MCPSpec],
         local_installed_uuids: &HashSet<Uuid>,
         managed_mcp_client: Arc<dyn ManagedMcpClient>,
+        task_id: Option<AmbientAgentTaskId>,
     ) -> Result<ResolvedMcpSpecs, AgentDriverError> {
         let mut resolved = ResolvedMcpSpecs::default();
 
@@ -1416,6 +1454,8 @@ impl AgentDriver {
                         })?;
                     let installations = Self::installations_from_managed_client_config_json(
                         &client_config.mcp_config_json,
+                        task_id,
+                        &uuid.to_string(),
                     )
                     .map_err(|err| {
                         AgentDriverError::ManagedMcpResolutionFailed {
@@ -1451,6 +1491,8 @@ impl AgentDriver {
                     };
                     match Self::installations_from_managed_client_config_json(
                         &client_config.mcp_config_json,
+                        task_id,
+                        id,
                     ) {
                         Ok(installations) => {
                             resolved.ephemeral_installations.extend(installations);
@@ -1524,6 +1566,8 @@ impl AgentDriver {
 
     fn installations_from_managed_client_config_json(
         json_str: &str,
+        task_id: Option<AmbientAgentTaskId>,
+        spec_token: &str,
     ) -> Result<Vec<TemplatableMCPServerInstallation>, AgentDriverError> {
         let normalized_json = normalize_mcp_json(json_str)
             .map_err(|e| AgentDriverError::MCPJsonParseError(e.to_string()))?;
@@ -1567,8 +1611,13 @@ impl AgentDriver {
                         });
                 }
 
+                let installation_id = ephemeral_mcp_installation_id(
+                    task_id,
+                    spec_token,
+                    &templatable_mcp_server.name,
+                );
                 Ok(TemplatableMCPServerInstallation::new(
-                    uuid::Uuid::new_v4(),
+                    installation_id,
                     templatable_mcp_server,
                     variable_values,
                 ))

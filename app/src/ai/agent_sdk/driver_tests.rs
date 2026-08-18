@@ -815,6 +815,15 @@ fn failed_cli_harness_session_defers_by_idle_on_fail() {
         ),
         None
     );
+    assert_eq!(
+        idle_window_for_cli_session_status(
+            &CLIAgentSessionStatus::Cancelled,
+            idle_on_complete,
+            idle_on_fail
+        ),
+        idle_on_complete,
+        "a Ctrl-C cancellation is a non-error completion, like Success or Blocked"
+    );
 }
 
 #[test]

@@ -14376,8 +14376,8 @@ impl Workspace {
                     }
                     RequestPermissionsOutcome::OtherError { error_message } => {
                         report_error!(
-                            "Unknown error when requesting notification permissions",
-                            extra: { "error_message" => %error_message }
+                            anyhow::anyhow!("{error_message}")
+                                .context("Unknown error when requesting notification permissions")
                         );
                     }
                 }
@@ -16075,8 +16075,8 @@ impl Workspace {
                                 &notification_error
                             {
                                 report_error!(
-                                    "Unknown error when sending notification",
-                                    extra: { "error_message" => %error_message }
+                                    anyhow::anyhow!("{error_message}")
+                                        .context("Unknown error when sending notification")
                                 );
                             }
                             send_telemetry_from_ctx!(

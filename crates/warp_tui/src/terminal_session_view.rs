@@ -3692,7 +3692,7 @@ impl TuiTerminalSessionView {
         let next = AISettings::as_ref(ctx).usage_display_mode.toggled();
         AISettings::handle(ctx).update(ctx, |settings, ctx| {
             if let Err(error) = settings.usage_display_mode.set_value(next, ctx) {
-                report_error!("failed to persist the TUI usage display mode: {error:#}");
+                report_error!(error.context("failed to persist the TUI usage display mode"));
             }
         });
     }
@@ -4913,7 +4913,7 @@ impl TuiTerminalSessionView {
         match result {
             Ok(()) => self.show_success_hint(success_hint.to_owned(), ctx),
             Err(error) => {
-                report_error!("failed to persist the TUI statusline config: {error:#}");
+                report_error!(error.context("failed to persist the TUI statusline config"));
                 self.show_transient_hint(STATUSLINE_PERSISTENCE_FAILED_HINT.to_owned(), ctx);
             }
         }

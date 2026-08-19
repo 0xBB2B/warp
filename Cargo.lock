@@ -6470,6 +6470,7 @@ dependencies = [
 name = "http_server"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "axum",
  "log",
  "tokio",

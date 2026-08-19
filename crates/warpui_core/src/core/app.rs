@@ -2661,7 +2661,7 @@ impl AppContext {
 
         match window_result {
             Err(err) => {
-                report_error!("error opening window", extra: { "error" => %err });
+                report_error!(err.context("error opening window"));
             }
             Ok(_) => {
                 self.on_window_invalidated(window_id, move |window_id, ctx| {

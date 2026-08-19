@@ -699,18 +699,22 @@ pub fn spawn_tui_driver<T: TuiView>(
     // never blocked waiting for input.
     let reader = thread::Builder::new()
         .name("warp-tui-input".to_owned())
-        .spawn(move || loop {
-            match event::read() {
-                Ok(event) => {
-                    // The reader runs on a dedicated thread, so blocking on the
-                    // send is fine; an error means the receiver was dropped.
-                    if block_on(sender.send(event)).is_err() {
+        .spawn(move || {
+            loop {
+                match event::read() {
+                    Ok(event) => {
+                        // The reader runs on a dedicated thread, so blocking on the
+                        // send is fine; an error means the receiver was dropped.
+                        if block_on(sender.send(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        report_error!(
+                            anyhow::Error::new(error).context("failed to read a terminal event")
+                        );
                         break;
                     }
-                }
-                Err(error) => {
-                    report_error!("failed to read a terminal event", extra: { "error" => %error });
-                    break;
                 }
             }
         })?;

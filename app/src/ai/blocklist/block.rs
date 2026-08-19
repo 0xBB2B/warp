@@ -2001,7 +2001,7 @@ impl AIBlock {
             }
         }
 
-        self.has_recording_related_actions = output.actions().any(|action| {
+        let has_recording_related_actions = output.actions().any(|action| {
             matches!(
                 &action.action,
                 AIAgentActionType::StartRecording { .. }
@@ -2009,6 +2009,13 @@ impl AIBlock {
                     | AIAgentActionType::UseComputer(_)
             )
         });
+        if self.has_recording_related_actions || has_recording_related_actions {
+            let conversation_id = self.client_ids.conversation_id;
+            self.action_model.update(ctx, |action_model, _ctx| {
+                action_model.invalidate_recording_spans(conversation_id);
+            });
+        }
+        self.has_recording_related_actions = has_recording_related_actions;
 
         if FeatureFlag::WebSearchUI.is_enabled() {
             // Handle WebSearch messages
@@ -5264,13 +5271,24 @@ impl AIBlock {
     }
 
     pub fn dismiss_ai_tooltips(&mut self, ctx: &mut ViewContext<Self>) {
-        self.detected_links_state.link_location_open_tooltip = None;
-        ctx.emit(AIBlockEvent::DismissLinkTooltip);
-        self.secret_redaction_state.dismiss_tooltip();
-        ctx.emit(AIBlockEvent::DismissSecretTooltip);
+        let dismissed_link_tooltip = self
+            .detected_links_state
+            .link_location_open_tooltip
+            .take()
+            .is_some();
+        if dismissed_link_tooltip {
+            ctx.emit(AIBlockEvent::DismissLinkTooltip);
+        }
+
+        let dismissed_secret_tooltip = self.secret_redaction_state.dismiss_tooltip();
+        if dismissed_secret_tooltip {
+            ctx.emit(AIBlockEvent::DismissSecretTooltip);
+        }
+
+        let mut dismissed_search_tooltip = false;
         for search_view in self.search_codebase_view.values() {
             search_view.update(ctx, |view, ctx| {
-                view.clear_link_tooltip(ctx);
+                dismissed_search_tooltip |= view.clear_link_tooltip(ctx);
             });
         }
 
@@ -5282,8 +5300,9 @@ impl AIBlock {
         {
             button_handles.reset_hover_state_on_focus_change();
         }
-
-        ctx.notify();
+        if dismissed_link_tooltip || dismissed_secret_tooltip || dismissed_search_tooltip {
+            ctx.notify();
+        }
     }
 
     fn open_link(

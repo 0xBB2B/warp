@@ -31,8 +31,8 @@ use super::{
     AgentDriver, AgentDriverError, CLIAgentSessionStatus, IdleTimeoutSender,
     LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV, LEGACY_OZ_PARENT_STATE_ROOT_ENV,
     OZ_MESSAGE_LISTENER_MANAGED_EXTERNALLY_ENV, OZ_MESSAGE_LISTENER_STATE_ROOT_ENV,
-    PlatformErrorCode, SDKConversationOutputStatus, build_secret_env_vars,
-    idle_window_for_cli_session_status, idle_window_for_terminal_status,
+    PlatformErrorCode, SDKConversationOutputStatus, WARP_MESSAGE_LISTENER_STATE_ROOT_ENV,
+    build_secret_env_vars, idle_window_for_cli_session_status, idle_window_for_terminal_status,
     setup_failure_status_update, terminal_status_log_outcome,
 };
 use crate::ai::agent::task::TaskId;
@@ -1097,9 +1097,54 @@ fn task_env_vars_propagate_message_listener_state_root_with_legacy_alias() {
         env_vars.get(&OsString::from(OZ_MESSAGE_LISTENER_STATE_ROOT_ENV)),
         Some(&OsString::from("/tmp/message-listener-root"))
     );
+    // The WARP_ twin is only reachable when the state root is actually set, which is why it is
+    // asserted here rather than in the pairing test: that test does not populate the process
+    // env, and making it do so would need `#[serial_test::serial]` to stay race-free.
+    assert_eq!(
+        env_vars.get(&OsString::from(WARP_MESSAGE_LISTENER_STATE_ROOT_ENV)),
+        Some(&OsString::from("/tmp/message-listener-root"))
+    );
     assert_eq!(
         env_vars.get(&OsString::from(LEGACY_OZ_PARENT_STATE_ROOT_ENV)),
         Some(&OsString::from("/tmp/message-listener-root"))
+    );
+}
+
+/// Every `OZ_` variable reaching a harness subprocess has a `WARP_` twin carrying the same
+/// value. This guard fails when one of a pair is injected without the other.
+///
+/// The legacy `OZ_PARENT_*` listener names are exempt: they exist only to keep an external
+/// Claude plugin working through its migration and are deliberately not given `WARP_` twins.
+#[test]
+fn task_env_vars_mirror_every_oz_var_to_a_warp_name() {
+    const LEGACY_ONLY: [&str; 2] = [
+        LEGACY_OZ_PARENT_LISTENER_MANAGED_EXTERNALLY_ENV,
+        LEGACY_OZ_PARENT_STATE_ROOT_ENV,
+    ];
+
+    let task_id: AmbientAgentTaskId = "550e8400-e29b-41d4-a716-446655440005".parse().unwrap();
+    let env_vars = task_env_vars(Some(&task_id), Some("parent-run-789"), Harness::Claude);
+
+    let mut paired = 0;
+    for (name, value) in &env_vars {
+        let Some(name) = name.to_str() else { continue };
+        let Some(suffix) = name.strip_prefix("OZ_") else {
+            continue;
+        };
+        if LEGACY_ONLY.contains(&name) {
+            continue;
+        }
+        paired += 1;
+        let warp_name = OsString::from(format!("WARP_{suffix}"));
+        assert_eq!(
+            env_vars.get(&warp_name),
+            Some(value),
+            "{name} is injected without a matching WARP_{suffix} carrying the same value"
+        );
+    }
+    assert!(
+        paired > 0,
+        "no OZ_ variables were injected, so the assertions above would prove nothing"
     );
 }
 

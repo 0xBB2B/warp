@@ -114,8 +114,8 @@ fn subpage_display_names_are_correct() {
         "Environments"
     );
     assert_eq!(
-        SettingsSection::OzCloudAPIKeys.to_string(),
-        "Oz Cloud API Keys"
+        SettingsSection::WarpCloudAgentAPIKeys.to_string(),
+        "API keys"
     );
 }
 
@@ -147,8 +147,14 @@ const ALL_SECTIONS: &[SettingsSection] = &[
     SettingsSection::CodeIndexing,
     SettingsSection::EditorAndCodeReview,
     SettingsSection::CloudEnvironments,
-    SettingsSection::OzCloudAPIKeys,
+    SettingsSection::WarpCloudAgentAPIKeys,
 ];
+
+/// Sections whose user-facing Display label has deliberately diverged from the
+/// slug it was seeded from, because the slug is a stored contract that the
+/// rename must not follow.
+const SECTIONS_WITH_RENAMED_DISPLAY_LABELS: &[SettingsSection] =
+    &[SettingsSection::WarpCloudAgentAPIKeys];
 
 #[test]
 fn all_sections_list_is_exhaustive() {
@@ -175,7 +181,7 @@ fn all_sections_list_is_exhaustive() {
             | SettingsSection::CodeIndexing
             | SettingsSection::EditorAndCodeReview
             | SettingsSection::CloudEnvironments
-            | SettingsSection::OzCloudAPIKeys => section,
+            | SettingsSection::WarpCloudAgentAPIKeys => section,
         };
         ALL_SECTIONS.contains(&known)
     }
@@ -209,15 +215,33 @@ fn slugs_are_unique_across_sections() {
 fn slugs_were_seeded_from_the_display_labels_they_replaced() {
     // Slugs were seeded from the Display strings that used to double as the
     // persistence key, so no data migration was needed. Display is now free to
-    // diverge; if it does, update this test rather than the slugs, which are a
-    // stored contract.
+    // diverge; when it does, list the section in
+    // SECTIONS_WITH_RENAMED_DISPLAY_LABELS rather than moving the slug, which
+    // is a stored contract.
     for section in ALL_SECTIONS {
+        if SECTIONS_WITH_RENAMED_DISPLAY_LABELS.contains(section) {
+            continue;
+        }
         assert_eq!(
             section.slug(),
             section.to_string(),
             "{section:?} slug diverged from the Display label it was seeded from"
         );
     }
+}
+
+#[test]
+fn renamed_sections_keep_the_slug_they_were_seeded_with() {
+    // The section dropped "Oz" from what the user reads, but persisted sessions
+    // and `surface.settings.open --page` still speak the original slug.
+    assert_eq!(
+        SettingsSection::WarpCloudAgentAPIKeys.to_string(),
+        "API keys"
+    );
+    assert_eq!(
+        SettingsSection::WarpCloudAgentAPIKeys.slug(),
+        "Oz Cloud API Keys"
+    );
 }
 
 #[test]
@@ -260,7 +284,11 @@ fn from_slug_accepts_legacy_spellings() {
     );
     assert_eq!(
         SettingsSection::from_slug("OzCloudAPIKeys"),
-        Some(SettingsSection::OzCloudAPIKeys)
+        Some(SettingsSection::WarpCloudAgentAPIKeys)
+    );
+    assert_eq!(
+        SettingsSection::from_slug("Oz Cloud API Keys"),
+        Some(SettingsSection::WarpCloudAgentAPIKeys)
     );
 }
 
@@ -326,7 +354,7 @@ fn realistic_nav_items() -> Vec<SettingsNavItem> {
             "Cloud platform",
             vec![
                 SettingsSection::CloudEnvironments,
-                SettingsSection::OzCloudAPIKeys,
+                SettingsSection::WarpCloudAgentAPIKeys,
             ],
         )),
         SettingsNavItem::Page(SettingsSection::Teams),
@@ -380,7 +408,7 @@ fn collapsed_umbrella_is_a_single_nav_stop() {
         NavStop::CollapsedUmbrella {
             nav_index: 4,
             first_subpage: SettingsSection::CloudEnvironments,
-            last_subpage: SettingsSection::OzCloudAPIKeys,
+            last_subpage: SettingsSection::WarpCloudAgentAPIKeys,
         }
     ));
     assert!(matches!(stops[5], NavStop::Section(SettingsSection::Teams)));

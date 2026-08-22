@@ -413,6 +413,20 @@ impl UserWorkspaces {
         self.window_team_uids.get(&window_id).copied().flatten()
     }
 
+    pub fn switch_window_to_team(
+        &mut self,
+        window_id: WindowId,
+        team_uid: ServerId,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.team_uid_for_window(window_id) == Some(team_uid) {
+            return;
+        }
+        self.window_team_uids.insert(window_id, Some(team_uid));
+        ctx.emit(UserWorkspacesEvent::WindowTeamChanged { window_id });
+        ctx.notify();
+    }
+
     /// Returns `true` when the user belongs to more than one team in the current
     /// workspace, meaning the team-switcher pill and dropdown should be shown.
     /// Single-team and no-workspace users return `false` so their UI is unchanged.

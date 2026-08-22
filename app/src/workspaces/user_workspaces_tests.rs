@@ -1065,7 +1065,7 @@ fn two_teams() -> (Team, Team) {
 }
 
 #[test]
-fn test_team_context_for_view_resolves_each_windows_own_team() {
+fn test_team_context_for_operation_resolves_each_windows_own_team() {
     let (team_a, team_b) = two_teams();
     let mut workspace = workspace_for_test(&team_a);
     workspace.teams.push(team_b.clone());
@@ -1081,31 +1081,22 @@ fn test_team_context_for_view_resolves_each_windows_own_team() {
         });
 
         let context_a = view_a.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
         let context_b = view_b.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
 
-        app.read(|ctx| {
-            let user_workspaces = UserWorkspaces::as_ref(ctx);
-            assert_eq!(
-                context_a
-                    .as_ref()
-                    .and_then(|context| user_workspaces.team_for_context(context))
-                    .map(|team| team.uid),
-                Some(team_a.uid),
-                "the view in window A should mint a context resolving to team A"
-            );
-            assert_eq!(
-                context_b
-                    .as_ref()
-                    .and_then(|context| user_workspaces.team_for_context(context))
-                    .map(|team| team.uid),
-                Some(team_b.uid),
-                "the view in window B should mint a context resolving to team B"
-            );
-        });
+        assert_eq!(
+            context_a.team_uid(),
+            Some(team_a.uid),
+            "the view in window A should mint a context resolving to team A"
+        );
+        assert_eq!(
+            context_b.team_uid(),
+            Some(team_b.uid),
+            "the view in window B should mint a context resolving to team B"
+        );
     })
 }
 
@@ -1126,18 +1117,16 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
         });
 
-        let context_a = view
-            .update(&mut app, |_, ctx| {
-                UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
-            })
-            .expect("a window assigned to team A should mint a context");
+        let context_a = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
 
         app.read(|ctx| {
             assert_eq!(
                 UserWorkspaces::as_ref(ctx)
-                    .team_render_context_for_view_handle(&weak_view, ctx)
-                    .map(|render| render.team.uid),
-                Some(team_a.uid)
+                    .team_context(&weak_view, ctx)
+                    .and_then(|context| context.team_uid()),
+                Some(team_a.uid),
             );
         });
 
@@ -1146,25 +1135,25 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
         });
 
         app.read(|ctx| {
-            let user_workspaces = UserWorkspaces::as_ref(ctx);
             assert_eq!(
-                user_workspaces
-                    .team_render_context_for_view_handle(&weak_view, ctx)
-                    .map(|render| render.team.uid),
+                UserWorkspaces::as_ref(ctx)
+                    .team_context(&weak_view, ctx)
+                    .and_then(|context| context.team_uid()),
                 Some(team_b.uid),
                 "a freshly resolved render context should follow the window to team B"
             );
-            assert!(
-                user_workspaces.team_for_context(&context_a).is_none(),
-                "a context captured for team A should stop resolving rather than follow the \
-                 window onto team B"
-            );
         });
+        assert_eq!(
+            context_a.team_uid(),
+            Some(team_a.uid),
+            "a context captured for team A should keep pointing at team A rather than follow \
+             the window onto team B"
+        );
     })
 }
 
 #[test]
-fn test_team_context_and_render_context_return_none_without_a_team() {
+fn test_team_contexts_represent_a_registered_teamless_window() {
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![]);
 
@@ -1174,21 +1163,16 @@ fn test_team_context_and_render_context_return_none_without_a_team() {
         });
 
         let context = view.update(&mut app, |_, ctx| {
-            UserWorkspaces::as_ref(ctx).team_context_for_view(ctx)
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
         });
-        assert!(
-            context.is_none(),
-            "a window with no team should not mint a TeamContext"
-        );
+        assert_eq!(context.team_uid(), None);
 
         let weak_view = view.downgrade();
         app.read(|ctx| {
-            assert!(
-                UserWorkspaces::as_ref(ctx)
-                    .team_render_context_for_view_handle(&weak_view, ctx)
-                    .is_none(),
-                "a window with no team should not resolve a TeamRenderContext"
-            );
+            let context = UserWorkspaces::as_ref(ctx)
+                .team_context(&weak_view, ctx)
+                .expect("a registered teamless window should resolve");
+            assert_eq!(context.team_uid(), None);
         });
     })
 }

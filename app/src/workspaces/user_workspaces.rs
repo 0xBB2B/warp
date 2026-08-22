@@ -208,8 +208,6 @@ pub(crate) struct TeamContextForOperation {
 /// workspace-level data. Code with no window at all must not construct a scope to route around
 /// this; it should read across every team explicitly, the way
 /// `UserWorkspaces::teams_allow_codebase_context` does.
-// Only tests call `team_uid()` today; remove this `#[allow(dead_code)]` once a Group 1
-// migration PR has a real getter generic over this trait.
 #[allow(dead_code)]
 pub(crate) trait TeamScope {
     fn team_uid(&self) -> Option<ServerId>;
@@ -233,18 +231,11 @@ impl TeamContextForOperation {
     }
 }
 
-/// The team a view renders as, borrowed for the duration of a single render.
+/// The team a view renders as, borrowed for the duration of a single read.
 ///
-/// Current-team UI must reflect the window's team as of this frame, so this is resolved
-/// per render rather than cached. The borrow is what enforces that: it cannot be stored in
-/// view state or moved into a `'static` future, and it deliberately offers no conversion to
-/// a [`TeamContextForOperation`]. A [`WeakViewHandle`] locates a window to read from; it is
-/// not evidence that the holder is running in that window, which is what minting operation
-/// scope requires.
-// Only tests construct one today; remove this once a Group 1 migration PR resolves one from a
-// real render.
-#[allow(dead_code)]
+/// It is resolved at the point of use so policy reads follow the view between windows.
 pub(crate) struct TeamContext<'a> {
+    #[allow(dead_code)]
     team_uid: Option<&'a ServerId>,
 }
 
@@ -254,6 +245,7 @@ impl TeamScope for TeamContext<'_> {
     }
 }
 
+pub(crate) type TeamContextResolver = Box<dyn for<'a> Fn(&'a AppContext) -> TeamContext<'a>>;
 impl UserWorkspaces {
     #[cfg(any(test, all(feature = "tui", feature = "test-util")))]
     pub fn mock(
@@ -462,8 +454,16 @@ impl UserWorkspaces {
         }
     }
 
-    /// Resolves `view`'s window team for one render. See [`TeamContext`].
-    // Only tests call this today; remove once a Group 1 migration PR has a real call site.
+    pub(crate) fn team_context_resolver<T: Entity>(view: WeakViewHandle<T>) -> TeamContextResolver {
+        Box::new(move |app| {
+            let team_uid = Self::as_ref(app)
+                .team_for_view_handle(&view, app)
+                .map(|team| &team.uid);
+            TeamContext { team_uid }
+        })
+    }
+
+    /// Resolves `view`'s window team for one read. See [`TeamContext`].
     #[allow(dead_code)]
     pub(crate) fn team_context<'a, T: Entity>(
         &'a self,

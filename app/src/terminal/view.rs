@@ -3161,6 +3161,7 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let terminal_view_id = ctx.view_id();
+        let terminal_view = ctx.handle();
         let active_session = ctx.add_model(|ctx| {
             ActiveSession::new(sessions.clone(), model_events_handle.clone(), ctx)
         });
@@ -3557,6 +3558,7 @@ impl TerminalView {
                 active_session.clone(),
                 model.clone(),
                 terminal_view_id,
+                terminal_view,
                 ctx,
             )
         });

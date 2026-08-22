@@ -201,6 +201,16 @@ pub struct ConversationUsageTotals {
     pub charged_usage: Option<ChargedUsageTotals>,
 }
 
+impl ConversationUsageTotals {
+    /// Returns the summed total of the tracked usage
+    /// if not available, falls back to the legacy provider total
+    pub fn total_cost_in_cents(&self) -> Option<f32> {
+        self.charged_usage
+            .map(|usage| usage.total_cost_in_cents())
+            .or(self.cost_in_cents)
+    }
+}
+
 /// Whether persisted or server usage metadata carries evidence that the
 /// conversation actually incurred usage. Metadata presence alone is not
 /// enough: the local persistence path always writes a (possibly all-default)

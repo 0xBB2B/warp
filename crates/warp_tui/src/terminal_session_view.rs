@@ -43,11 +43,12 @@ use warp::tui_export::{
     TuiOnboardingMarker, TuiOnboardingMarkers, TuiOnboardingMarkersEvent,
     TuiSlashCommandDataSource, TuiSlashCommandDataSourceArgs, TuiUpArrowHistoryItemKind,
     TuiUserInfoManager, TuiUserInfoManagerEvent, TuiZeroStateDataSource, UserTakeOverReason,
-    WAKEUP_THROTTLE_PERIOD, WarpConfig, WarpConfigUpdateEvent, block_context_from_terminal_model,
-    build_slash_command_mixer, detect_possible_git_repo, export_conversation_markdown,
-    loaded_subtree_rollup, log_out_tui, maybe_build_ai_query_upsert_event,
-    prepare_conversation_block_restoration, record_autodetection_toggle_from_slash_command,
-    record_saved_prompt_accepted, record_static_slash_command_accepted, saved_prompt_text_for_id,
+    UserWorkspaces, UserWorkspacesEvent, WAKEUP_THROTTLE_PERIOD, WarpConfig, WarpConfigUpdateEvent,
+    block_context_from_terminal_model, build_slash_command_mixer, detect_possible_git_repo,
+    export_conversation_markdown, loaded_subtree_rollup, log_out_tui,
+    maybe_build_ai_query_upsert_event, prepare_conversation_block_restoration,
+    record_autodetection_toggle_from_slash_command, record_saved_prompt_accepted,
+    record_static_slash_command_accepted, saved_prompt_text_for_id,
     slash_command_selection_behavior, throttle,
 };
 use warp_core::channel::{Channel, ChannelState};
@@ -623,6 +624,9 @@ pub(crate) enum TuiTerminalSessionAction {
     /// Click on the footer's active-model label: toggles the inline model
     /// picker (the same menu `/model` surfaces).
     ToggleModelMenu,
+    /// Click on the footer's active-team label: toggles the team switcher (the
+    /// same menu `/team` surfaces).
+    ToggleTeamMenu,
     /// Toggle per-conversation auto approve.
     ToggleAutoApprove { show_feedback: bool },
     /// Open a URL from an interactive statusline item.
@@ -724,6 +728,7 @@ pub(crate) struct TuiTerminalSessionView {
     /// (not created inline during render) so it survives element-tree rebuilds
     /// — the same `MouseStateHandle` pattern as [`UsageToggle`].
     model_label_hover: MouseStateHandle,
+    team_label_hover: MouseStateHandle,
     /// Hover and click state for the configured TODO statusline control.
     todo_list_mouse: MouseStateHandle,
     /// Hover and click state for the configured Voice statusline control.
@@ -2160,6 +2165,15 @@ impl TuiTerminalSessionView {
                 ctx.notify();
             }
         });
+        ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |_, _, event, ctx| {
+            if matches!(
+                event,
+                UserWorkspacesEvent::WindowTeamChanged { window_id }
+                    if *window_id == ctx.window_id()
+            ) {
+                ctx.notify();
+            }
+        });
         ctx.subscribe_to_model(&sessions, |view, _, event, ctx| match event {
             SessionsEvent::SessionBootstrapped(bootstrap_event)
                 if view.active_session.as_ref(ctx).session_id(ctx)
@@ -2303,6 +2317,7 @@ impl TuiTerminalSessionView {
             usage_toggle: UsageToggle::default(),
             hidden_response_summary_exchange_ids: HashSet::new(),
             model_label_hover: MouseStateHandle::default(),
+            team_label_hover: MouseStateHandle::default(),
             todo_list_mouse: MouseStateHandle::default(),
             #[cfg(feature = "voice_input")]
             voice_input_mouse: MouseStateHandle::default(),
@@ -3862,6 +3877,16 @@ impl TuiTerminalSessionView {
     /// preserve active-menu arbitration, input cleanup, and selection handling.
     fn toggle_model_menu(&mut self, ctx: &mut ViewContext<Self>) {
         self.model_menu.update(ctx, |menu, ctx| {
+            if menu.is_open(ctx) {
+                menu.dismiss(ctx);
+            } else {
+                menu.open(ctx);
+            }
+        });
+    }
+
+    fn toggle_team_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        self.team_menu.update(ctx, |menu, ctx| {
             if menu.is_open(ctx) {
                 menu.dismiss(ctx);
             } else {
@@ -5636,6 +5661,7 @@ impl TypedActionView for TuiTerminalSessionView {
             }
             TuiTerminalSessionAction::ToggleTodoMenu => self.toggle_todo_menu(ctx),
             TuiTerminalSessionAction::ToggleModelMenu => self.toggle_model_menu(ctx),
+            TuiTerminalSessionAction::ToggleTeamMenu => self.toggle_team_menu(ctx),
             TuiTerminalSessionAction::ToggleAutoApprove { show_feedback } => {
                 self.toggle_auto_approve(*show_feedback, ctx)
             }

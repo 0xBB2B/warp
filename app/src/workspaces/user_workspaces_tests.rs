@@ -50,6 +50,8 @@ use warpui::{AddSingletonModel, App, Element, TypedActionView, View, ViewHandle,
 use warpui_extras::user_preferences;
 
 use super::*;
+use crate::ai::blocklist::is_agent_mode_autonomy_allowed;
+use crate::ai::execution_profiles::ActionPermission;
 use crate::ai::llms::LLMModelHost;
 use crate::auth::AuthManager;
 use crate::cloud_object::model::persistence::CloudModel;
@@ -73,8 +75,8 @@ use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::{
-    AdminEnablementSetting, HostEnablementSetting, LlmHostSettings, MultiAdminPolicy,
-    PurchaseAddOnCreditsPolicy, Workspace,
+    AdminEnablementSetting, EnforceableSetting, HostEnablementSetting, LlmHostSettings,
+    MultiAdminPolicy, PurchaseAddOnCreditsPolicy, SplitListSetting, Workspace,
 };
 
 #[derive(Default)]
@@ -786,7 +788,6 @@ fn test_window_team_assignment_is_immutable() {
 
     App::test((), |mut app| async move {
         initialize_window_team_test_app(&mut app, vec![workspace]);
-
         let window_id = WindowId::new();
         UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
             user_workspaces.set_team_for_window(window_id, second_team.uid, ctx);
@@ -1127,7 +1128,7 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             assert_eq!(
                 UserWorkspaces::as_ref(ctx)
                     .team_context(&weak_view, ctx)
-                    .and_then(|context| context.team_uid()),
+                    .team_uid(),
                 Some(team_a.uid),
             );
         });
@@ -1140,7 +1141,7 @@ fn test_window_team_reconciliation_moves_rendering_but_not_a_captured_context() 
             assert_eq!(
                 UserWorkspaces::as_ref(ctx)
                     .team_context(&weak_view, ctx)
-                    .and_then(|context| context.team_uid()),
+                    .team_uid(),
                 Some(team_b.uid),
                 "a freshly resolved render context should follow the window to team B"
             );
@@ -1278,10 +1279,417 @@ fn test_team_contexts_represent_a_registered_teamless_window() {
 
         let weak_view = view.downgrade();
         app.read(|ctx| {
-            let context = UserWorkspaces::as_ref(ctx)
-                .team_context(&weak_view, ctx)
-                .expect("a registered teamless window should resolve");
+            let context = UserWorkspaces::as_ref(ctx).team_context(&weak_view, ctx);
             assert_eq!(context.team_uid(), None);
+        });
+    })
+}
+
+fn autonomy_setting(value: ActionPermission) -> EnforceableSetting<Option<ActionPermission>> {
+    EnforceableSetting {
+        value: Some(value),
+        is_enforced_by_workspace: false,
+    }
+}
+
+/// A team whose admins enforce `execute_commands`, so the team is distinguishable from one
+/// that enforces nothing and from a team enforcing something else.
+fn team_enforcing_execute_commands(team: &Team, value: ActionPermission) -> Team {
+    let mut team = team.clone();
+    team.settings.ai_autonomy.execute_commands = autonomy_setting(value);
+    team
+}
+
+#[test]
+fn test_ai_autonomy_settings_resolve_each_windows_own_team() {
+    let (team_a, team_b) = two_teams();
+    let team_a = team_enforcing_execute_commands(&team_a, ActionPermission::AlwaysAsk);
+    let team_b = team_enforcing_execute_commands(&team_b, ActionPermission::AlwaysAllow);
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+
+        let scope_a = view_a.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+        let scope_b = view_b.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces
+                    .ai_autonomy_settings(&scope_a)
+                    .execute_commands_setting,
+                Some(ActionPermission::AlwaysAsk),
+                "the window on team A should read team A's policy"
+            );
+            assert_eq!(
+                user_workspaces
+                    .ai_autonomy_settings(&scope_b)
+                    .execute_commands_setting,
+                Some(ActionPermission::AlwaysAllow),
+                "the window on team B should read team B's policy"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_ai_autonomy_settings_for_a_teamless_window_fall_back_to_the_workspace() {
+    let team = team_enforcing_execute_commands(&team_for_test(), ActionPermission::AlwaysAsk);
+    let mut workspace = workspace_for_test(&team);
+    workspace
+        .settings
+        .ai_autonomy_settings
+        .execute_commands_setting = Some(ActionPermission::AlwaysAllow);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+
+        let scope = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+        assert_eq!(scope.team_uid(), None);
+
+        app.read(|ctx| {
+            assert_eq!(
+                UserWorkspaces::as_ref(ctx)
+                    .ai_autonomy_settings(&scope)
+                    .execute_commands_setting,
+                Some(ActionPermission::AlwaysAllow),
+                "a window on no team falls back to the workspace policy"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_ai_autonomy_settings_fall_back_to_the_workspace_for_a_user_with_no_teams() {
+    let mut workspace = workspace_for_test(&team_for_test());
+    workspace.teams.clear();
+    workspace
+        .settings
+        .ai_autonomy_settings
+        .execute_commands_setting = Some(ActionPermission::AlwaysAllow);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+
+        let scope = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+
+        app.read(|ctx| {
+            assert_eq!(
+                UserWorkspaces::as_ref(ctx)
+                    .ai_autonomy_settings(&scope)
+                    .execute_commands_setting,
+                Some(ActionPermission::AlwaysAllow),
+                "with no teams at all the workspace layer is genuinely team-neutral, so it is \
+                 the right fallback"
+            );
+        });
+    })
+}
+
+/// A window only changes teams by reconciling away from a team that left the workspace, so
+/// that is also the only way to observe a captured scope and a freshly resolved one
+/// disagreeing about which policy applies.
+#[test]
+fn test_a_captured_autonomy_scope_does_not_follow_its_window_to_another_team() {
+    let (team_a, team_b) = two_teams();
+    let team_a = team_enforcing_execute_commands(&team_a, ActionPermission::AlwaysAsk);
+    let team_b = team_enforcing_execute_commands(&team_b, ActionPermission::AlwaysAllow);
+    let mut workspace = workspace_for_test(&team_a);
+    workspace.teams.push(team_b.clone());
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team_a.uid, ctx);
+        });
+
+        let captured = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+
+        app.read(|ctx| {
+            assert_eq!(
+                UserWorkspaces::as_ref(ctx)
+                    .ai_autonomy_settings(&captured)
+                    .execute_commands_setting,
+                Some(ActionPermission::AlwaysAsk),
+            );
+        });
+
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.update_workspaces(vec![workspace_for_test(&team_b)], ctx);
+        });
+
+        let weak_view = view.downgrade();
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            assert_eq!(
+                user_workspaces
+                    .ai_autonomy_settings(&captured)
+                    .execute_commands_setting,
+                None,
+                "the captured scope's team is gone, so it imposes no policy rather than \
+                 silently adopting team B's"
+            );
+
+            let resolved = user_workspaces.team_context(&weak_view, ctx);
+            assert_eq!(
+                user_workspaces
+                    .ai_autonomy_settings(&resolved)
+                    .execute_commands_setting,
+                Some(ActionPermission::AlwaysAllow),
+                "a freshly resolved scope follows the window onto team B"
+            );
+        });
+    })
+}
+
+/// A list no admin layer contributed to is not an override. This is also the case the
+/// client cannot yet tell apart from a layer explicitly configuring an empty list, which
+/// needs `StringListSettingInfo.isConfigured` from the server.
+#[test]
+fn test_an_unconfigured_team_list_setting_is_not_an_override() {
+    let mut team = team_for_test();
+    team.settings.ai_autonomy.execute_commands_allowlist = SplitListSetting::default();
+    let workspace = workspace_for_test(&team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team.uid, ctx);
+        });
+
+        let scope = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+
+        app.read(|ctx| {
+            let settings = UserWorkspaces::as_ref(ctx).ai_autonomy_settings(&scope);
+            assert!(
+                !settings.has_override_for_execute_commands_allowlist(),
+                "an admin who has configured no allowlist entries is not enforcing an empty \
+                 allowlist"
+            );
+        });
+    })
+}
+
+/// The merged `values` is the whole policy: a list contributed to by both admin layers reads
+/// as one override of exactly the merged `values`, not the layers concatenated.
+///
+/// The layers deliberately overlap on `ls`, so `values` and `workspace_entries ++
+/// team_entries` differ in length. With disjoint layers the two are the same list and this
+/// test would pass against an implementation that concatenated.
+#[test]
+fn test_a_team_list_setting_overrides_with_its_merged_values() {
+    let mut team = team_for_test();
+    team.settings.ai_autonomy.execute_commands_allowlist = SplitListSetting {
+        values: vec!["ls".to_string(), "git status".to_string()],
+        workspace_entries: vec!["ls".to_string()],
+        team_entries: vec!["ls".to_string(), "git status".to_string()],
+    };
+    let workspace = workspace_for_test(&team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team.uid, ctx);
+        });
+
+        let scope = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+
+        app.read(|ctx| {
+            let settings = UserWorkspaces::as_ref(ctx).ai_autonomy_settings(&scope);
+            assert!(settings.has_override_for_execute_commands_allowlist());
+            let allowlist = settings
+                .execute_commands_allowlist
+                .expect("a non-empty list is an override");
+            assert_eq!(
+                allowlist.len(),
+                2,
+                "the merged values are the policy, so entries are not counted once per layer"
+            );
+            assert!(allowlist.iter().any(|predicate| predicate.matches("ls")));
+            assert!(
+                allowlist
+                    .iter()
+                    .any(|predicate| predicate.matches("git status"))
+            );
+        });
+    })
+}
+
+/// Allowlists merge by intersection, so two admin layers that share no entries produce an
+/// empty `values` while both layers plainly configured one. That is an override permitting
+/// nothing, and reading it as "no override" would hand the decision back to the user's own
+/// profile — the permissive answer to a deny-by-default setting.
+#[test]
+fn test_disjoint_admin_allowlists_are_an_override_that_permits_nothing() {
+    let mut team = team_for_test();
+    team.settings.ai_autonomy.execute_commands_allowlist = SplitListSetting {
+        values: vec![],
+        workspace_entries: vec!["ls".to_string()],
+        team_entries: vec!["git status".to_string()],
+    };
+    let workspace = workspace_for_test(&team);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team.uid, ctx);
+        });
+
+        let scope = view.update(&mut app, |_, ctx| {
+            UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx)
+        });
+
+        app.read(|ctx| {
+            let settings = UserWorkspaces::as_ref(ctx).ai_autonomy_settings(&scope);
+            assert!(
+                settings.has_override_for_execute_commands_allowlist(),
+                "both layers configured an allowlist, so the intersection being empty is an \
+                 override rather than an absence"
+            );
+            assert_eq!(
+                settings
+                    .execute_commands_allowlist
+                    .expect("a configured list is an override")
+                    .len(),
+                0,
+                "the layers agree on nothing, so nothing is allowlisted"
+            );
+        });
+    })
+}
+
+/// The tier policy is the interim fallback for a team whose admins enforce nothing, and it
+/// is billing entitlement, so it is read from the workspace rather than per team.
+fn workspace_without_autonomy_entitlement(teams: Vec<Team>) -> Workspace {
+    let mut workspace = workspace_for_test(&team_for_test());
+    workspace.teams = teams;
+    workspace.billing_metadata.tier.ai_autonomy_policy = Some(AIAutonomyPolicy {
+        is_enabled: false,
+        toggleable: true,
+    });
+    workspace
+}
+
+#[test]
+fn test_ai_autonomy_allowed_uses_the_scoped_team() {
+    let (team_a, team_b) = two_teams();
+    let team_a = team_enforcing_execute_commands(&team_a, ActionPermission::AlwaysAsk);
+    let workspace = workspace_without_autonomy_entitlement(vec![team_a.clone(), team_b.clone()]);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+        let (window_a, view_a) = create_test_window(&mut app);
+        let (window_b, view_b) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_a, team_a.uid, ctx);
+            user_workspaces.set_team_for_window(window_b, team_b.uid, ctx);
+        });
+        let view_a = view_a.downgrade();
+        let view_b = view_b.downgrade();
+
+        app.read(|ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope_a = user_workspaces.team_context(&view_a, ctx);
+            let scope_b = user_workspaces.team_context(&view_b, ctx);
+            assert!(
+                is_agent_mode_autonomy_allowed(&scope_a, ctx),
+                "team A configures autonomy, so its window should allow autonomy"
+            );
+            assert!(
+                !is_agent_mode_autonomy_allowed(&scope_b, ctx),
+                "team B configures no autonomy policy and the workspace tier does not allow it"
+            );
+        });
+    })
+}
+
+#[test]
+fn test_ai_autonomy_allowed_uses_the_workspace_tier_fallback() {
+    let team = team_for_test();
+    let mut workspace = workspace_for_test(&team);
+    workspace.billing_metadata.tier.ai_autonomy_policy = Some(AIAutonomyPolicy {
+        is_enabled: true,
+        toggleable: true,
+    });
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.set_team_for_window(window_id, team.uid, ctx);
+        });
+        let view = view.downgrade();
+
+        app.read(|ctx| {
+            let scope = UserWorkspaces::as_ref(ctx).team_context(&view, ctx);
+            assert!(is_agent_mode_autonomy_allowed(&scope, ctx));
+        });
+    })
+}
+
+#[test]
+fn test_ai_autonomy_falls_back_to_the_workspace_layer_with_no_teams() {
+    let mut workspace = workspace_without_autonomy_entitlement(vec![]);
+    workspace
+        .settings
+        .ai_autonomy_settings
+        .execute_commands_setting = Some(ActionPermission::AlwaysAsk);
+
+    App::test((), |mut app| async move {
+        initialize_window_team_test_app(&mut app, vec![workspace]);
+        let (window_id, view) = create_test_window(&mut app);
+        UserWorkspaces::handle(&app).update(&mut app, |user_workspaces, ctx| {
+            user_workspaces.register_window(window_id, None, ctx);
+        });
+        let view = view.downgrade();
+
+        app.read(|ctx| {
+            let scope = UserWorkspaces::as_ref(ctx).team_context(&view, ctx);
+            assert!(
+                is_agent_mode_autonomy_allowed(&scope, ctx),
+                "a user with no teams reads the workspace layer, which is team-neutral for them"
+            );
         });
     })
 }

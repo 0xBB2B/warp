@@ -4224,14 +4224,16 @@ impl SettingsWidget for AgentAttributionWidget {
 
     fn render(
         &self,
-        _view: &Self::View,
+        view: &Self::View,
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
 
-        let org_setting = UserWorkspaces::as_ref(app).get_agent_attribution_setting();
+        let workspaces = UserWorkspaces::as_ref(app);
+        let scope = workspaces.team_context(&view.self_handle, app);
+        let org_setting = workspaces.get_agent_attribution_setting(&scope);
         let state = derive_agent_attribution_toggle_state(
             &org_setting,
             *ai_settings.agent_attribution_enabled,

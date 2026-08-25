@@ -51,6 +51,9 @@ use crate::ai::agent_sdk::driver::harness::{
     HarnessCleanupDisposition, HarnessKind, HarnessRunner, ResumePayload, SavePoint,
     ThirdPartyHarness, ThirdPartyHarnessTelemetryEvent, harness_model_env_vars, task_env_vars,
 };
+use crate::ai::agent_sdk::environment_snapshot::{
+    EnvironmentSnapshot, EnvironmentSnapshotReporter,
+};
 use crate::ai::agent_sdk::retry::{is_transient_graphql_or_http_error, with_bounded_retry_using};
 use crate::ai::agent_sdk::setup_observability::{SetupClientEventReporter, SetupStep};
 use crate::ai::ambient_agents::task::HarnessModelConfig;
@@ -2726,25 +2729,39 @@ impl AgentDriver {
             ai_client_for_refresh,
             oidc_strategy_for_refresh,
         ) = async {
-            let setup_events = foreground
-            .spawn(|me, ctx| {
-                let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client().clone();
-                match me.task_id {
-                    Some(task_id) => {
-                        SetupClientEventReporter::new(task_id, ai_client, ctx.background_executor())
+            let (setup_events, environment_snapshot_reporter) = foreground
+                .spawn(|me, ctx| {
+                    let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client().clone();
+                    let background = ctx.background_executor();
+                    match me.task_id {
+                        Some(task_id) => (
+                            SetupClientEventReporter::new(
+                                task_id,
+                                ai_client.clone(),
+                                background.clone(),
+                            ),
+                            EnvironmentSnapshotReporter::new(task_id, ai_client, background),
+                        ),
+                        None => {
+                            report_error!(
+                                "No task ID found for driver - cannot report client events"
+                            );
+                            (
+                                SetupClientEventReporter::noop(
+                                    ai_client.clone(),
+                                    background.clone(),
+                                ),
+                                EnvironmentSnapshotReporter::noop(ai_client, background),
+                            )
+                        }
                     }
-                    None => {
-                        report_error!("No task ID found for driver - cannot report client events");
-                        SetupClientEventReporter::noop(ai_client, ctx.background_executor())
-                    }
-                }
-            })
-            .await?;
+                })
+                .await?;
 
-        foreground
-            .spawn(|me, _| me.check_working_dir())
-            .await?
-            .await?;
+            foreground
+                .spawn(|me, _| me.check_working_dir())
+                .await?
+                .await?;
 
         // IMPORTANT: Wait for the terminal session to bootstrap before starting MCP servers.
         // Some of the initializations are necessary for the MCP servers to start correctly.
@@ -3013,6 +3030,7 @@ impl AgentDriver {
                                 remove_repository_origins,
                             ),
                             setup_events_for_environment,
+                            environment_snapshot_reporter.clone(),
                             ctx,
                         )
                     })
@@ -3072,6 +3090,8 @@ impl AgentDriver {
                         .await?;
                 }
             }
+        } else {
+            environment_snapshot_reporter.report(EnvironmentSnapshot::empty());
         }
 
         // Skill loading is Oz-only; third-party harnesses have their own skill systems.

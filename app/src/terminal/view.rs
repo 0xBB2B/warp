@@ -4506,7 +4506,7 @@ impl TerminalView {
                         ctx.notify();
                     }
                     RemoteServerManagerEvent::SessionConnected { session_id, .. } => {
-                        me.model.lock().event_proxy.send_terminal_event(
+                        me.model.lock().event_proxy.send_app_event(
                             crate::terminal::event::Event::RemoteServerReady {
                                 session_id: *session_id,
                             },
@@ -4542,7 +4542,7 @@ impl TerminalView {
                         proxy_stderr,
                         is_cancelled,
                     } => {
-                        me.model.lock().event_proxy.send_terminal_event(
+                        me.model.lock().event_proxy.send_app_event(
                             crate::terminal::event::Event::RemoteServerFailed {
                                 session_id: *session_id,
                                 error: error.clone(),

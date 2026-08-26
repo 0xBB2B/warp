@@ -1161,13 +1161,17 @@ impl ServerApi {
     pub async fn transcribe(
         &self,
         request: &TranscribeRequest,
+        team_scope: RequestTeamScope,
     ) -> Result<TranscribeResponse, TranscribeError> {
         let auth_token = self.get_or_refresh_access_token().await?;
 
-        let request_builder = self
+        let mut request_builder = self
             .base_client
             .http_client()
             .post(format!("{}/ai/transcribe", ChannelState::server_root_url()));
+        if let Some(team_uid) = team_scope.team_uid() {
+            request_builder = request_builder.header(TEAM_UID_HEADER, team_uid.uid());
+        }
         let response = if let Some(token) = auth_token.as_bearer_token() {
             request_builder.bearer_auth(token)
         } else {

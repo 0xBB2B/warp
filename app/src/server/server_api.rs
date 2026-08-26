@@ -1036,14 +1036,18 @@ impl ServerApi {
     pub async fn generate_ai_input_suggestions(
         &self,
         request: &GenerateAIInputSuggestionsRequest,
+        team_scope: RequestTeamScope,
     ) -> Result<generate_ai_input_suggestions::GenerateAIInputSuggestionsResponseV2, AIApiError>
     {
         let auth_token = self.get_or_refresh_access_token().await?;
 
-        let request_builder = self.base_client.http_client().post(format!(
+        let mut request_builder = self.base_client.http_client().post(format!(
             "{}/ai/generate_input_suggestions",
             ChannelState::server_root_url()
         ));
+        if let Some(team_uid) = team_scope.team_uid() {
+            request_builder = request_builder.header(TEAM_UID_HEADER, team_uid.uid());
+        }
         let response = if let Some(token) = auth_token.as_bearer_token() {
             request_builder.bearer_auth(token)
         } else {

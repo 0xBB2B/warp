@@ -119,7 +119,9 @@ fn test_leaving_team_removes_objects() {
                     None,
                     None,
                     None,
+                    None,
                 )]),
+                None,
             )],
             &mut app,
         );

@@ -28,7 +28,9 @@ use warp_graphql::workspace::{
     ComputerUseAutonomyValue as GqlComputerUseAutonomyValue,
     ComputerUseSettingInfo as GqlComputerUseSettingInfo,
     FeatureModelChoice as GqlFeatureModelChoice, LinkSharingSettings as GqlLinkSharingSettings,
-    LinkSharingSettingsInfo as GqlLinkSharingSettingsInfo, LlmSettings as GqlLlmSettings,
+    LinkSharingSettingsInfo as GqlLinkSharingSettingsInfo, LlmContextWindow as GqlLlmContextWindow,
+    LlmInfo as GqlLlmInfo, LlmPricing as GqlLlmPricing, LlmProvider as GqlLlmProvider,
+    LlmSettings as GqlLlmSettings, LlmUsageMetadata as GqlLlmUsageMetadata,
     MembershipRole as GqlMembershipRole,
     SandboxedAgentSettingsInfo as GqlSandboxedAgentSettingsInfo,
     SecretRedactionRegexListInfo as GqlSecretRedactionRegexListInfo,
@@ -53,7 +55,7 @@ use warpui_extras::user_preferences;
 use super::*;
 use crate::ai::blocklist::is_agent_mode_autonomy_allowed;
 use crate::ai::execution_profiles::ActionPermission;
-use crate::ai::llms::{LLMModelHost, LLMProvider};
+use crate::ai::llms::{LLMInfo, LLMModelHost, LLMProvider, MODELS_BY_FEATURE_CACHE_KEY};
 use crate::auth::AuthManager;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObject, CloudObjectGuest};
@@ -187,6 +189,7 @@ fn test_loading_all_spaces_after_switching_from_offline() {
         billing_metadata: Default::default(),
         stripe_customer_id: None,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         is_eligible_for_discovery: false,
         has_billing_history: false,
         visibility: TeamVisibility::Open,
@@ -202,6 +205,7 @@ fn test_loading_all_spaces_after_switching_from_offline() {
         billing_cycle_usage: None,
         has_billing_history: false,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         invite_link_domain_restrictions: vec![],
         pending_email_invites: vec![],
         is_eligible_for_discovery: false,
@@ -323,6 +327,7 @@ fn team_for_test() -> Team {
         billing_metadata: Default::default(),
         stripe_customer_id: None,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         is_eligible_for_discovery: false,
         has_billing_history: false,
         visibility: TeamVisibility::Open,
@@ -747,6 +752,7 @@ fn workspace_for_test(team: &Team) -> Workspace {
         billing_cycle_usage: None,
         has_billing_history: false,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         invite_link_domain_restrictions: vec![],
         pending_email_invites: vec![],
         is_eligible_for_discovery: false,
@@ -2716,6 +2722,7 @@ fn test_joining_team_moves_objects() {
         billing_metadata: Default::default(),
         stripe_customer_id: None,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         is_eligible_for_discovery: false,
         has_billing_history: false,
         visibility: TeamVisibility::Open,
@@ -2731,6 +2738,7 @@ fn test_joining_team_moves_objects() {
         billing_cycle_usage: None,
         has_billing_history: false,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         invite_link_domain_restrictions: vec![],
         pending_email_invites: vec![],
         is_eligible_for_discovery: false,
@@ -3085,6 +3093,7 @@ fn test_leaving_team_moves_objects() {
         billing_metadata: Default::default(),
         stripe_customer_id: None,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         is_eligible_for_discovery: false,
         has_billing_history: false,
         visibility: TeamVisibility::Open,
@@ -3100,6 +3109,7 @@ fn test_leaving_team_moves_objects() {
         billing_cycle_usage: None,
         has_billing_history: false,
         settings: Default::default(),
+        feature_model_choice: Default::default(),
         invite_link_domain_restrictions: vec![],
         pending_email_invites: vec![],
         is_eligible_for_discovery: false,
@@ -3693,6 +3703,11 @@ fn gql_team_settings() -> GqlTeamSettings {
 }
 
 fn gql_team(uid: &str, name: &str, member_uids: &[&str]) -> GqlTeam {
+    let empty_llms = GqlAvailableLlms {
+        default_id: String::new(),
+        choices: vec![],
+        preferred_codex_model_id: None,
+    };
     GqlTeam {
         // `ServerId` rejects anything but a 22-character id.
         uid: format!("{uid:0>22}").into(),
@@ -3710,6 +3725,13 @@ fn gql_team(uid: &str, name: &str, member_uids: &[&str]) -> GqlTeam {
         settings: gql_team_settings(),
         invite_link: None,
         visibility: GqlTeamVisibility::Open,
+        feature_model_choice: GqlFeatureModelChoice {
+            agent_mode: empty_llms.clone(),
+            planning: empty_llms.clone(),
+            coding: empty_llms.clone(),
+            cli_agent: empty_llms.clone(),
+            computer_use_agent: empty_llms,
+        },
     }
 }
 
@@ -3981,4 +4003,153 @@ fn test_workspace_policy_wins_over_user_level_policy() {
             );
         });
     })
+}
+
+/// A `GqlLlmInfo` fixture identified by `id`, for the model-choice fixtures below.
+fn gql_llm_info(id: &str) -> GqlLlmInfo {
+    GqlLlmInfo {
+        display_name: id.to_string(),
+        base_model_name: id.to_string(),
+        id: id.to_string(),
+        reasoning_level: None,
+        usage_metadata: GqlLlmUsageMetadata {
+            credit_multiplier: None,
+            request_multiplier: 1,
+        },
+        description: None,
+        disable_reason: None,
+        vision_supported: false,
+        spec: None,
+        provider: GqlLlmProvider::Unknown,
+        host_configs: vec![],
+        pricing: GqlLlmPricing {
+            discount_percentage: None,
+        },
+        context_window: GqlLlmContextWindow {
+            is_configurable: false,
+            min: 0.into(),
+            max: 0.into(),
+            default: 0.into(),
+        },
+    }
+}
+
+/// A `GqlFeatureModelChoice` whose every feature offers exactly one model, `model_id`, so a
+/// test can tell two teams' choices apart by that single id.
+fn gql_feature_model_choice(model_id: &str) -> GqlFeatureModelChoice {
+    let llms = GqlAvailableLlms {
+        default_id: model_id.to_string(),
+        choices: vec![gql_llm_info(model_id)],
+        preferred_codex_model_id: None,
+    };
+    GqlFeatureModelChoice {
+        agent_mode: llms.clone(),
+        planning: llms.clone(),
+        coding: llms.clone(),
+        cli_agent: llms.clone(),
+        computer_use_agent: llms,
+    }
+}
+
+#[test]
+fn team_feature_model_choices_conversion_keeps_each_teams_choice_distinct() {
+    // Each team's uid must map to its own model choice, never a shared or swapped one. Nothing
+    // reads `Team.feature_model_choice`/`Workspace.feature_model_choice` yet -- `LLMPreferences`
+    // still resolves its catalog from the legacy cache -- but the conversion that folds the
+    // catalog into the ordinary `Team`/`Workspace` payload must already keep each team's choice
+    // separate.
+    let mut team_a = gql_team("team-a", "Team A", &["test-user"]);
+    team_a.feature_model_choice = gql_feature_model_choice("team-a-only");
+    let mut team_b = gql_team("team-b", "Team B", &["test-user"]);
+    team_b.feature_model_choice = gql_feature_model_choice("team-b-only");
+    let mut workspace = gql_workspace("workspace_uid123456789", None);
+    workspace.teams = vec![team_a, team_b];
+
+    let response: WorkspacesMetadataResponse = gql_user(None, vec![workspace]).into();
+
+    assert_eq!(response.workspaces.len(), 1);
+    let teams = &response.workspaces[0].teams;
+    assert_eq!(
+        teams.len(),
+        2,
+        "both teams' choices should survive the fold"
+    );
+
+    let team_a_uid = ServerId::from_string_lossy(format!("{:0>22}", "team-a"));
+    let team_b_uid = ServerId::from_string_lossy(format!("{:0>22}", "team-b"));
+
+    let choice_a = &teams
+        .iter()
+        .find(|team| team.uid == team_a_uid)
+        .expect("team A's choice should be keyed by team A's own uid")
+        .feature_model_choice;
+    let choice_b = &teams
+        .iter()
+        .find(|team| team.uid == team_b_uid)
+        .expect("team B's choice should be keyed by team B's own uid")
+        .feature_model_choice;
+
+    assert!(
+        choice_a.info_for_id(&"team-a-only".into()).is_some(),
+        "team A's uid must map to team A's own choice, not a shared or swapped payload"
+    );
+    assert!(
+        choice_a.info_for_id(&"team-b-only".into()).is_none(),
+        "team A's uid must not resolve team B's choice"
+    );
+    assert!(
+        choice_b.info_for_id(&"team-b-only".into()).is_some(),
+        "team B's uid must map to team B's own choice, not a shared or swapped payload"
+    );
+    assert!(
+        choice_b.info_for_id(&"team-a-only".into()).is_none(),
+        "team B's uid must not resolve team A's choice"
+    );
+}
+
+#[test]
+fn legacy_cache_migration_yields_a_usable_teamless_catalog() {
+    // The older, pre-`ModelsByFeature` cache shape was a bare `AvailableLLMs`, written when
+    // all available LLMs were solely for Agent Mode. Migrating it must still produce a
+    // catalog whose `agent_mode` bucket resolves the cached model -- a "usable teamless
+    // catalog" -- not an empty or default one.
+    warpui::App::test((), |mut app| async move {
+        app.update(|ctx| {
+            ctx.add_singleton_model(|_| {
+                PrivatePreferences::new(
+                    Box::<user_preferences::in_memory::InMemoryPreferences>::default(),
+                )
+            });
+        });
+
+        let legacy_agent_mode = AvailableLLMs::new(
+            "legacy-model".into(),
+            vec![LLMInfo::new_for_test("legacy-model")],
+            None,
+        )
+        .expect("legacy AvailableLLMs fixture should be valid");
+
+        app.update(|ctx| {
+            ctx.private_user_preferences()
+                .write_value(
+                    MODELS_BY_FEATURE_CACHE_KEY,
+                    serde_json::to_string(&legacy_agent_mode)
+                        .expect("legacy fixture should serialize"),
+                )
+                .expect("legacy cache should be writable");
+        });
+
+        app.update(|ctx| {
+            let migrated = migrate_legacy_feature_model_choices_cache(ctx)
+                .expect("a legacy bare-AvailableLLMs cache should still migrate");
+            assert!(
+                migrated
+                    .agent_mode
+                    .info_for_id(&"legacy-model".into())
+                    .is_some(),
+                "the older bare-AvailableLLMs cache shape should become a usable teamless \
+                 agent_mode catalog"
+            );
+        });
+    });
 }

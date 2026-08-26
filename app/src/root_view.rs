@@ -625,6 +625,7 @@ fn requires_post_onboarding_login(
     !is_logged_in
         && (FeatureFlag::AccountFirstOnboarding.is_enabled() || ai_enabled || warp_drive_enabled)
 }
+
 /// Replaces the settings and tutorial snapshots consumed when post-auth
 /// onboarding eventually completes.
 ///
@@ -1688,6 +1689,17 @@ impl NewWorkspaceSource {
 
         UserWorkspaces::as_ref(ctx).inherited_or_default_team_uid(source_window_id)
     }
+
+    /// Whether this source points at specific content (e.g. a shared session or a cloud
+    /// conversation) that a new window should reach directly, rather than being deferred
+    /// behind product onboarding.
+    pub(crate) fn is_content_deep_link(&self) -> bool {
+        matches!(
+            self,
+            NewWorkspaceSource::SharedSessionAsViewer { .. }
+                | NewWorkspaceSource::FromCloudConversationId { .. }
+        )
+    }
 }
 
 /// Args needed to construct a `Workspace`.
@@ -1894,13 +1906,14 @@ impl RootView {
                 if #[cfg(target_family = "wasm")] {
                     AuthOnboardingState::WebImport(AuthOnboardingTarget::Workspace(workspace_args.into()))
                 } else {
-                    // Onboarding runs before login for users who have not completed it locally.
-                    let should_show_pre_login_onboarding = FeatureFlag::AgentOnboarding.is_enabled()
-                        && !has_completed_local_onboarding(ctx);
+
                     if FeatureFlag::ForceLogin.is_enabled() {
                         // ForceLogin is true for Preview
                         AuthOnboardingState::Auth(workspace_args.into())
-                    } else if should_show_pre_login_onboarding {
+                    } else if FeatureFlag::AgentOnboarding.is_enabled()
+                        && !has_completed_local_onboarding(ctx)
+                        && !workspace_args.workspace_setting.is_content_deep_link()
+                    {
                         let workspace_args_box: Box<WorkspaceArgs> = workspace_args.into();
                         let onboarding_view = Self::create_agent_onboarding_view(ctx);
                         onboarding_view.update(ctx, |view, ctx| {
@@ -3173,14 +3186,17 @@ impl RootView {
                 // Generic session link: ambient-ness (if any) is discovered at SessionJoined.
                 workspace.add_tab_for_joining_shared_session(*session_id, false, ctx);
             });
-            let window_id = ctx.window_id();
-            ctx.windows().show_window_and_focus_app(window_id);
-            ctx.notify();
-            true
-        } else {
+        } else if !self
+            .auth_onboarding_state
+            .retarget_pending_workspace_for_shared_session(*session_id)
+        {
             log::warn!("Auth not complete before trying to join shared session");
-            false
+            return false;
         }
+        let window_id = ctx.window_id();
+        ctx.windows().show_window_and_focus_app(window_id);
+        ctx.notify();
+        true
     }
 
     /// Opens a cloud conversation in an existing window.
@@ -4109,9 +4125,15 @@ impl AuthOnboardingState {
     fn try_open_onboarding_slides(&mut self, ctx: &mut ViewContext<RootView>) {
         let target = match self {
             AuthOnboardingState::Auth(args) | AuthOnboardingState::ConfirmIncomingAuth(args) => {
+                if args.workspace_setting.is_content_deep_link() {
+                    return;
+                }
                 AuthOnboardingTarget::Workspace(args.clone())
             }
             AuthOnboardingState::Terminal(workspace) => {
+                if workspace.as_ref(ctx).opened_from_content_deep_link() {
+                    return;
+                }
                 AuthOnboardingTarget::Terminal(workspace.clone())
             }
             _ => {
@@ -4247,6 +4269,34 @@ impl AuthOnboardingState {
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
             }
         }
+    }
+
+    /// Redirects a workspace that has not yet been created to join `session_id`.
+    fn retarget_pending_workspace_for_shared_session(&mut self, session_id: SessionId) -> bool {
+        let workspace_args = match self {
+            AuthOnboardingState::Auth(args) | AuthOnboardingState::ConfirmIncomingAuth(args) => {
+                args
+            }
+            AuthOnboardingState::Onboarding { target, .. }
+            | AuthOnboardingState::LoginSlide { target, .. }
+            | AuthOnboardingState::PostAuthOnboarding { target, .. }
+            | AuthOnboardingState::NeedsSsoLink(target) => {
+                let AuthOnboardingTarget::Workspace(args) = target else {
+                    return false;
+                };
+                args
+            }
+            #[cfg(target_family = "wasm")]
+            AuthOnboardingState::WebImport(target) => {
+                let AuthOnboardingTarget::Workspace(args) = target else {
+                    return false;
+                };
+                args
+            }
+            AuthOnboardingState::Terminal(_) => return false,
+        };
+        workspace_args.workspace_setting = NewWorkspaceSource::SharedSessionAsViewer { session_id };
+        true
     }
 }
 

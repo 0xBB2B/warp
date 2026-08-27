@@ -4238,8 +4238,10 @@ impl TerminalView {
         }
 
         ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, ai_settings_event, ctx| {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = user_workspaces.team_context_for_view(ctx);
             if let AISettingsChangedEvent::AwsBedrockCredentialsEnabled { .. } = ai_settings_event
-                && !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx)
+                && !user_workspaces.is_aws_bedrock_credentials_enabled(&scope, ctx)
             {
                 me.remove_aws_bedrock_login_banner(ctx);
             }
@@ -10220,7 +10222,12 @@ impl TerminalView {
         };
 
         // Return early if we've run out of AI usage.
-        if !AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(ctx) {
+        let has_any_ai = {
+            let user_workspaces = UserWorkspaces::as_ref(ctx);
+            let scope = user_workspaces.team_context_for_view(ctx);
+            AIRequestUsageModel::as_ref(ctx).has_any_ai_remaining(&scope, ctx)
+        };
+        if !has_any_ai {
             return false;
         }
 
@@ -10790,7 +10797,9 @@ impl TerminalView {
         }
 
         // Check if AWS Bedrock is available in the workspace
-        if !UserWorkspaces::as_ref(ctx).is_aws_bedrock_credentials_enabled(ctx) {
+        let user_workspaces = UserWorkspaces::as_ref(ctx);
+        let scope = user_workspaces.team_context_for_view(ctx);
+        if !user_workspaces.is_aws_bedrock_credentials_enabled(&scope, ctx) {
             return;
         }
 

@@ -232,7 +232,6 @@ fn test_loading_all_spaces_after_switching_from_offline() {
                         workspaces: vec![],
                         joinable_teams: vec![],
                         experiments: None,
-                        feature_model_choices: None,
                         ai_credit_availability: None,
                         user_purchase_policy: None,
                     },
@@ -251,7 +250,6 @@ fn test_loading_all_spaces_after_switching_from_offline() {
                         workspaces: vec![workspace.clone()],
                         joinable_teams: vec![],
                         experiments: None,
-                        feature_model_choices: None,
                         ai_credit_availability: None,
                         user_purchase_policy: None,
                     },
@@ -412,7 +410,6 @@ fn test_aws_bedrock_credentials_respect_user_setting() {
                 workspaces: vec![workspace_for_poll.clone()],
                 joinable_teams: vec![],
                 experiments: None,
-                feature_model_choices: None,
                 ai_credit_availability: None,
                 user_purchase_policy: None,
             },
@@ -464,7 +461,6 @@ fn test_aws_bedrock_credentials_enforced_by_admin() {
                 workspaces: vec![workspace_for_poll.clone()],
                 joinable_teams: vec![],
                 experiments: None,
-                feature_model_choices: None,
                 ai_credit_availability: None,
                 user_purchase_policy: None,
             },
@@ -3595,7 +3591,6 @@ fn test_remove_user_from_team_success_emits_success_event_and_refreshes_members(
                         workspaces: vec![updated_workspace.clone()],
                         joinable_teams: vec![],
                         experiments: None,
-                        feature_model_choices: None,
                         ai_credit_availability: None,
                         user_purchase_policy: None,
                     },
@@ -4228,11 +4223,7 @@ fn gql_feature_model_choice(model_id: &str) -> GqlFeatureModelChoice {
 
 #[test]
 fn team_feature_model_choices_conversion_keeps_each_teams_choice_distinct() {
-    // Each team's uid must map to its own model choice, never a shared or swapped one. Nothing
-    // reads `Team.feature_model_choice`/`Workspace.feature_model_choice` yet -- `LLMPreferences`
-    // still resolves its catalog from the legacy cache -- but the conversion that folds the
-    // catalog into the ordinary `Team`/`Workspace` payload must already keep each team's choice
-    // separate.
+    // Each team's uid must map to its own model choice, never a shared or swapped one.
     let mut team_a = gql_team("team-a", "Team A", &["test-user"]);
     team_a.feature_model_choice = gql_feature_model_choice("team-a-only");
     let mut team_b = gql_team("team-b", "Team B", &["test-user"]);

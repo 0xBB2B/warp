@@ -13,6 +13,7 @@
 //! plan's own BYO entitlement.
 
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use regex::Regex;
 use settings::Setting;
@@ -20,7 +21,9 @@ use warp_core::features::FeatureFlag;
 use warpui::{AppContext, Entity, SingletonEntity, ViewContext, WeakViewHandle, WindowId};
 
 use super::UserWorkspaces;
-use crate::ai::llms::{LLMId, LLMModelHost, LLMProvider};
+#[cfg(any(test, feature = "test-util"))]
+use crate::ai::llms::LLMInfo;
+use crate::ai::llms::{LLMId, LLMModelHost, LLMProvider, ModelsByFeature};
 use crate::auth::AuthStateProvider;
 use crate::server::ids::ServerId;
 use crate::settings::{AISettings, AgentModeCommandExecutionPredicate};
@@ -102,6 +105,27 @@ impl sealed::Sealed for TeamScopeForCli {}
 impl TeamScope for TeamScopeForCli {
     fn team_uid(&self) -> Option<ServerId> {
         Some(self.0)
+    }
+}
+
+pub struct ResolvedTeamScope(Option<ServerId>);
+
+impl ResolvedTeamScope {
+    pub fn from_scope(scope: &(impl TeamScope + ?Sized)) -> Self {
+        Self(scope.team_uid())
+    }
+
+    #[cfg(feature = "agent_mode_evals")]
+    pub(crate) fn teamless() -> Self {
+        Self(None)
+    }
+}
+
+impl sealed::Sealed for ResolvedTeamScope {}
+
+impl TeamScope for ResolvedTeamScope {
+    fn team_uid(&self) -> Option<ServerId> {
+        self.0
     }
 }
 
@@ -206,6 +230,10 @@ impl UserWorkspaces {
                 .and_then(|team_uid| self.team_from_uid(team_uid))
                 .map(|team| &team.uid),
         }
+    }
+
+    pub fn team_context_for_window(&self, window_id: WindowId) -> TeamContext<'_> {
+        self.team_context_for_window_id(window_id)
     }
 
     /// [`Self::team_context_for_view`] for tests, which build scopes for bare windows rather
@@ -665,6 +693,78 @@ impl UserWorkspaces {
             |workspace| workspace.settings.ai_autonomy_settings.clone(),
             AiAutonomySettings::default(),
         )
+    }
+
+    pub(crate) fn feature_model_choice_for_scope<S: TeamScope + ?Sized>(
+        &self,
+        scope: &S,
+    ) -> &ModelsByFeature {
+        static DEFAULT: OnceLock<ModelsByFeature> = OnceLock::new();
+        self.scoped_or_workspace_setting(
+            scope,
+            |team| &team.feature_model_choice,
+            |workspace| &workspace.feature_model_choice,
+            self.workspaceless_models_by_feature
+                .as_ref()
+                .unwrap_or_else(|| DEFAULT.get_or_init(ModelsByFeature::default)),
+        )
+    }
+
+    pub(crate) fn feature_model_choice_for_team_uid(
+        &self,
+        team_uid: Option<ServerId>,
+    ) -> &ModelsByFeature {
+        self.feature_model_choice_for_scope(&TeamContextForOperation { team_uid })
+    }
+
+    pub(crate) fn set_feature_model_choice_for_team_uid(
+        &mut self,
+        team_uid: Option<ServerId>,
+        models: ModelsByFeature,
+    ) {
+        match team_uid {
+            Some(team_uid) => {
+                if let Some(workspace) = self.current_workspace_mut()
+                    && let Some(team) = workspace.teams.iter_mut().find(|t| t.uid == team_uid)
+                {
+                    team.feature_model_choice = models;
+                }
+            }
+            None => match self.current_workspace_mut() {
+                Some(workspace) => workspace.feature_model_choice = models,
+                None => self.set_workspaceless_models_by_feature(models),
+            },
+        }
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn add_agent_mode_model_for_test_for_team_uid(
+        &mut self,
+        team_uid: Option<ServerId>,
+        llm: LLMInfo,
+    ) {
+        match team_uid {
+            Some(team_uid) => {
+                if let Some(workspace) = self.current_workspace_mut()
+                    && let Some(team) = workspace.teams.iter_mut().find(|t| t.uid == team_uid)
+                {
+                    team.feature_model_choice
+                        .agent_mode
+                        .push_choice_for_test(llm);
+                }
+            }
+            None => match self.current_workspace_mut() {
+                Some(workspace) => workspace
+                    .feature_model_choice
+                    .agent_mode
+                    .push_choice_for_test(llm),
+                None => self
+                    .workspaceless_models_by_feature
+                    .get_or_insert_with(ModelsByFeature::default)
+                    .agent_mode
+                    .push_choice_for_test(llm),
+            },
+        }
     }
 
     /// The organization-managed command denylist a sandboxed agent must obey, for `scope`'s

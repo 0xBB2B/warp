@@ -107,7 +107,7 @@ use crate::terminal::cli_agent_sessions::{
 };
 use crate::terminal::model::BlockId;
 use crate::terminal::view::ConversationRestorationInNewPaneType;
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::user_workspaces::{ResolvedTeamScope, UserWorkspaces};
 use crate::workspaces::workspace::BillingMetadata;
 
 pub(crate) mod attachments;
@@ -4013,11 +4013,15 @@ impl AgentDriver {
         model_id: LLMId,
         ctx: &mut ModelContext<Self>,
     ) -> Result<(), AgentDriverError> {
-        let terminal_view_id = self.terminal_driver.as_ref(ctx).terminal_view().id();
+        let terminal_view = self.terminal_driver.as_ref(ctx).terminal_view();
+        let terminal_view_id = terminal_view.id();
+        let scope = ResolvedTeamScope::from_scope(
+            &UserWorkspaces::as_ref(ctx).team_context_for_window(terminal_view.window_id(ctx)),
+        );
         log::info!("Selecting base agent model {model_id} (from agent driver)");
 
         LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
-            preferences.update_preferred_agent_mode_llm(&model_id, terminal_view_id, ctx);
+            preferences.update_preferred_agent_mode_llm(&scope, &model_id, terminal_view_id, ctx);
         });
         Ok(())
     }

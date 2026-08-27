@@ -539,7 +539,8 @@ use crate::workspace::view::orchestration_launch_modal::{
 };
 use crate::workspace::view::right_panel::{RightPanelEvent, RightPanelView};
 use crate::workspace::{ForkFromExchange, ForkedConversationDestination};
-use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::workspaces::update_manager::TeamUpdateManager;
+use crate::workspaces::user_workspaces::{ResolvedTeamScope, UserWorkspaces};
 use crate::workspaces::workspace::AdminEnablementSetting;
 use crate::{
     AgentNotificationsModel, BlocklistAIHistoryModel, GlobalResourceHandles, TelemetryEvent,
@@ -15859,8 +15860,12 @@ impl Workspace {
             ctx,
         );
         let handoff_terminal_view_id = model_handle.as_ref(ctx).terminal_view_id();
+        let scope = ResolvedTeamScope::from_scope(
+            &UserWorkspaces::as_ref(ctx).team_context_for_window(source_view.window_id(ctx)),
+        );
         LLMPreferences::handle(ctx).update(ctx, |preferences, ctx| {
             preferences.update_preferred_agent_mode_llm(
+                &scope,
                 &HandoffLLMId::from(presentation.model_id.as_str()),
                 handoff_terminal_view_id,
                 ctx,
@@ -19259,8 +19264,12 @@ impl Workspace {
                     return;
                 };
 
+                let scope = ResolvedTeamScope::from_scope(
+                    &UserWorkspaces::as_ref(ctx)
+                        .team_context_for_window(terminal_view.window_id(ctx)),
+                );
                 let Some(codex_model_id) = LLMPreferences::as_ref(ctx)
-                    .get_preferred_codex_model()
+                    .get_preferred_codex_model(&scope, ctx)
                     .map(|info| info.id.clone())
                 else {
                     report_error!("No preferred codex model found");
@@ -26268,6 +26277,9 @@ impl TypedActionView for Workspace {
             }
             OpenNewWindowForTeam { team_uid } => {
                 let team_uid = *team_uid;
+                TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
+                    std::mem::drop(manager.refresh_workspace_metadata(ctx));
+                });
                 let existing_window_id = ctx
                     .windows()
                     .ordered_window_ids()

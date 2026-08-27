@@ -6,7 +6,6 @@ use warp_core::features::FeatureFlag;
 use warp_core::settings::{ChangeEventReason, Setting};
 use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_error;
-use warp_graphql::workspace::FeatureModelChoice;
 use warpui::{
     AppContext, Entity, ModelContext, SingletonEntity, Tracked, ViewContext, WeakViewHandle,
     WindowId,
@@ -53,7 +52,7 @@ pub(crate) use team_workspace_settings::GeminiEnterpriseBackgroundHost;
 pub(crate) use team_workspace_settings::TeamContextForOperation;
 #[cfg(test)]
 pub(crate) use team_workspace_settings::TeamlessScopeForTest;
-pub use team_workspace_settings::{TeamContext, TeamContextResolver, TeamScope};
+pub use team_workspace_settings::{ResolvedTeamScope, TeamContext, TeamContextResolver, TeamScope};
 
 const STRIPE_SUBSCRIPTION_INTERVAL_PAGE_PREFIX: &str = "/upgrade";
 
@@ -127,6 +126,10 @@ pub struct UserWorkspaces {
     /// filtered out of `workspaces` — this is the only place their purchase
     /// policy survives.
     user_purchase_policy: Option<PurchaseAddOnCreditsPolicy>,
+    /// The model catalog to fall back to when no current workspace exists: before login, or
+    /// for a logged-in user whose only workspace is the server's placeholder, which is
+    /// filtered out of `workspaces`.
+    workspaceless_models_by_feature: Option<ModelsByFeature>,
     team_client: Arc<dyn TeamClient>,
     workspace_client: Arc<dyn WorkspaceClient>,
 }
@@ -140,11 +143,6 @@ pub struct WorkspacesMetadataResponse {
     pub joinable_teams: Vec<DiscoverableTeam>,
     /// The list of experiments applicable to the user.
     pub experiments: Option<Vec<ServerExperiment>>,
-    /// TODO(Tyler): Post-workspaces, move this into the workspace object.
-    /// Feature model choices may change from user to user and while the app is open, so we need to periodically update this list.
-    /// It makes most sense to fetch this in workspaces which is queried every 10 minutes.
-    /// This is list of available LLM models for the user.
-    pub feature_model_choices: Option<FeatureModelChoice>,
     /// The server-authoritative AI credit availability decision, piggybacked
     /// on the metadata query so every refresh keeps the shared state fresh.
     pub ai_credit_availability: Option<AICreditAvailability>,
@@ -191,6 +189,7 @@ impl UserWorkspaces {
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
+            workspaceless_models_by_feature: None,
             team_client,
             workspace_client,
         }
@@ -241,6 +240,7 @@ impl UserWorkspaces {
             window_team_uids: Default::default(),
             joinable_teams: Default::default(),
             user_purchase_policy: None,
+            workspaceless_models_by_feature: None,
             team_client,
             workspace_client,
         };
@@ -261,6 +261,10 @@ impl UserWorkspaces {
         }
 
         me
+    }
+
+    pub(crate) fn set_workspaceless_models_by_feature(&mut self, models: ModelsByFeature) {
+        self.workspaceless_models_by_feature = Some(models);
     }
 
     pub fn upgrade_link(user_id: UserUid) -> String {

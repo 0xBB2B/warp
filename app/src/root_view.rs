@@ -107,7 +107,7 @@ use crate::workspace::view::OnboardingTutorial;
 use crate::workspace::{PaneViewLocator, Workspace, WorkspaceAction, WorkspaceRegistry};
 use crate::workspaces::team_tester::TeamTesterStatus;
 use crate::workspaces::update_manager::TeamUpdateManager;
-use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
+use crate::workspaces::user_workspaces::{ResolvedTeamScope, UserWorkspaces, UserWorkspacesEvent};
 use crate::workspaces::workspace::FtueAccountClass;
 use crate::{
     ChannelState, GlobalResourceHandles, GlobalResourceHandlesProvider, UpdateQuakeModeEventArg,
@@ -160,11 +160,14 @@ fn team_enforces_autonomy(ctx: &ViewContext<RootView>) -> bool {
 /// advances off, so every path that could follow a purchase goes through here
 /// rather than refreshing its own subset.
 fn refresh_onboarding_account_state(ctx: &mut ViewContext<RootView>) {
+    let scope = ResolvedTeamScope::from_scope(
+        &UserWorkspaces::as_ref(ctx).team_context(&ctx.handle(), ctx),
+    );
     AIRequestUsageModel::handle(ctx).update(ctx, |usage, ctx| {
         usage.request_availability_refresh(ctx);
     });
     LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
-        prefs.refresh_available_models(ctx);
+        prefs.refresh_available_models(&scope, ctx);
     });
     TeamUpdateManager::handle(ctx).update(ctx, |manager, ctx| {
         drop(manager.refresh_workspace_metadata(ctx));
@@ -2154,8 +2157,11 @@ impl RootView {
     fn create_agent_onboarding_view(
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<AgentOnboardingView> {
+        let scope = ResolvedTeamScope::from_scope(
+            &UserWorkspaces::as_ref(ctx).team_context(&ctx.handle(), ctx),
+        );
         LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
-            prefs.refresh_available_models(ctx);
+            prefs.refresh_available_models(&scope, ctx);
         });
 
         let themes = onboarding_theme_picker_themes();

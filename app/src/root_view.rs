@@ -1851,6 +1851,8 @@ pub struct RootView {
     /// settings to apply after a new user login / initial cloud load completes
     pending_post_auth_onboarding_settings: Option<SelectedSettings>,
     pending_account_first_settings_class: Option<FtueAccountClass>,
+    /// Prevents onboarding on a new device from overwriting an existing preference.
+    pending_account_first_is_new_account: bool,
     pending_account_first_tutorial_after_settings: bool,
     pending_account_first_sso_login: Option<AccountFirstLoginContext>,
     account_first_refresh_in_flight: bool,
@@ -1961,6 +1963,7 @@ impl RootView {
             pending_tutorial: None,
             pending_post_auth_onboarding_settings: None,
             pending_account_first_settings_class: None,
+            pending_account_first_is_new_account: false,
             pending_account_first_tutorial_after_settings: false,
             pending_account_first_sso_login: None,
             account_first_refresh_in_flight: false,
@@ -2478,6 +2481,10 @@ impl RootView {
         if FeatureFlag::HOAOnboardingFlow.is_enabled() {
             mark_hoa_onboarding_completed(ctx);
         }
+        let is_new_account = !AuthStateProvider::as_ref(ctx)
+            .get()
+            .is_onboarded()
+            .unwrap_or(true);
         if AuthStateProvider::as_ref(ctx).get().is_logged_in() {
             AuthManager::handle(ctx).update(ctx, |model, ctx| model.set_user_onboarded(ctx));
         }
@@ -2492,6 +2499,7 @@ impl RootView {
                 apply_account_first_onboarding_settings(
                     &selected_settings,
                     account_class,
+                    is_new_account,
                     team_context,
                     ctx,
                 );
@@ -2499,6 +2507,7 @@ impl RootView {
             true
         } else {
             self.pending_account_first_settings_class = account_class;
+            self.pending_account_first_is_new_account = is_new_account;
             false
         };
 
@@ -2545,6 +2554,7 @@ impl RootView {
                 self.pending_tutorial = None;
                 self.pending_post_auth_onboarding_settings = None;
                 self.pending_account_first_settings_class = None;
+                self.pending_account_first_is_new_account = false;
                 self.pending_account_first_tutorial_after_settings = false;
                 ctx.emit(RootViewEvent::AuthOnboardingStateChanged);
                 self.focus(ctx);
@@ -3858,11 +3868,13 @@ impl RootView {
             return;
         }
         if let Some(account_class) = self.pending_account_first_settings_class.take() {
+            let is_new_account = self.pending_account_first_is_new_account;
             if let Some(selected_settings) = self.pending_post_auth_onboarding_settings.take() {
                 let team_context = UserWorkspaces::as_ref(ctx).team_context_for_operation(ctx);
                 apply_account_first_onboarding_settings(
                     &selected_settings,
                     Some(account_class),
+                    is_new_account,
                     team_context,
                     ctx,
                 );

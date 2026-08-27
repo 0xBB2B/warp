@@ -673,6 +673,51 @@ settings::macros::implement_setting_for_enum!(
     toml_path: "agents.usage_display_mode",
     description: "Which unit the usage entry displays in Warp Agent CLI: credits or provider cost.",
 );
+
+/// Unit for GUI usage and spend displays.
+#[derive(
+    Default,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Copy,
+    Clone,
+    EnumIter,
+    schemars::JsonSchema,
+    settings_value::SettingsValue,
+)]
+#[schemars(
+    description = "Which unit the GUI's usage/spend displays show: credits or dollars.",
+    rename_all = "snake_case"
+)]
+pub enum UsageDisplayUnit {
+    #[default]
+    Credits,
+    Dollars,
+}
+
+settings::macros::implement_setting_for_enum!(
+    UsageDisplayUnit,
+    AISettings,
+    SupportedPlatforms::ALL,
+    SyncToCloud::Globally(RespectUserSyncSetting::Yes),
+    surface: settings::SettingSurfaces::GUI,
+    private: false,
+    toml_path: "agents.warp_agent.other.usage_display_unit",
+    description: "Which unit the GUI's usage/spend displays show: credits or dollars.",
+    feature_flag: FeatureFlag::PricingTransparency,
+);
+
+impl UsageDisplayUnit {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            UsageDisplayUnit::Credits => "Credits",
+            UsageDisplayUnit::Dollars => "Dollars",
+        }
+    }
+}
+
 /// One configurable item in the Warp Agent CLI statusline.
 #[derive(
     Debug,
@@ -1486,6 +1531,7 @@ define_settings_group!(AISettings, settings: [
     //
     // TUI-only and file-backed so the choice persists across TUI sessions.
     usage_display_mode: TuiUsageDisplayMode,
+    usage_display_unit: UsageDisplayUnit,
     // Ordered visibility configuration for the TUI's bottom statusline.
     // TUI-only and local so separate devices can use different terminal layouts.
     tui_statusline: TuiStatusline {

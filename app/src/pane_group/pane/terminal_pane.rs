@@ -34,7 +34,10 @@ use crate::ai::blocklist::agent_view::{AgentViewControllerEvent, AgentViewEntryO
 use crate::ai::blocklist::orchestration_event_streamer::OrchestrationEventStreamer;
 use crate::ai::blocklist::{BlocklistAIHistoryModel, StartAgentRequest};
 #[cfg(not(target_family = "wasm"))]
-use crate::ai::blocklist::{apply_child_agent_model_override, prepare_local_oz_child_launch};
+use crate::ai::blocklist::{
+    apply_child_agent_model_override, finish_local_oz_child_conversation,
+    prepare_local_oz_child_launch,
+};
 use crate::ai::conversation_utils;
 use crate::ai::llms::LLMPreferences;
 use crate::ai::orchestration::{RemoteChildLaunchConfig, prepare_remote_child_launch};
@@ -1681,23 +1684,13 @@ fn launch_local_no_harness_child(
                         model_id.as_deref(),
                         ctx,
                     );
-
-                    // Stamp the task id on the child conversation directly
-                    // so the share-reporter in
-                    // `local_tty/terminal_manager.rs` can resolve it from
-                    // the selected conversation when the share handshake
-                    // succeeds. Mirrors how `OrchestrationViewerModel`
-                    // stamps run/task ids onto viewer child placeholders.
-                    BlocklistAIHistoryModel::handle(ctx).update(ctx, |model, ctx| {
-                        if let Some(conversation) = model.conversation_mut(&conversation_id) {
-                            conversation.set_task_id(child_task_id);
-                        }
-                        model.record_new_conversation_request_complete(
-                            request_id,
-                            conversation_id,
-                            ctx,
-                        );
-                    });
+                    finish_local_oz_child_conversation(
+                        conversation_id,
+                        terminal_view_id,
+                        child_task_id,
+                        request_id,
+                        ctx,
+                    );
 
                     new_terminal_view.update(ctx, |terminal_view, ctx| {
                         terminal_view
@@ -1812,6 +1805,7 @@ fn launch_local_harness_child(
                 } = launch;
                 let is_shared_session_creator =
                     inherit_share_for_local_child(host_source.as_ref(), task_id);
+
                 match create_hidden_child_agent_conversation(
                     group,
                     HiddenChildAgentConversationRequest {

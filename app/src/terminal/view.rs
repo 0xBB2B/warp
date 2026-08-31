@@ -122,7 +122,7 @@ use session_sharing_protocol::sharer::{
 use settings::{Setting, ToggleableSetting};
 use shared_session::cloud_conversation_continuation::CloudConversationContinuationUiState;
 pub(crate) use shared_session::cloud_conversation_continuation::{
-    AIQueryRouting, CompletedChildPresentation, ConversationAccess,
+    AIQueryRouting, CloudRoutingIndicator, CompletedChildPresentation, ConversationAccess,
     completed_child_conversation_access, completed_child_presentation, resolve_ai_query_routing,
 };
 use shared_session::{SharedSessionAdapter, Viewer};

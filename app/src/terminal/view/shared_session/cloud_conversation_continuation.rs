@@ -57,9 +57,34 @@ pub(crate) enum AIQueryRouting {
     Local,
 }
 
+/// Which cloud-connection chip the agent input footer should show for a routing decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloudRoutingIndicator {
+    LiveSession,
+    NewCloudVm,
+}
+
 impl AIQueryRouting {
     pub(crate) fn is_local(&self) -> bool {
         matches!(self, Self::Local)
+    }
+
+    /// Live-VM requires an ambient task id so shared local session viewers stay unmarked.
+    pub(crate) fn cloud_routing_indicator(&self) -> Option<CloudRoutingIndicator> {
+        match self {
+            Self::LiveRemoteVm {
+                ambient_agent_task_id: Some(_),
+                ..
+            } => Some(CloudRoutingIndicator::LiveSession),
+            Self::NewCloudVm { .. } => Some(CloudRoutingIndicator::NewCloudVm),
+            // Shared *local* session viewers (no ambient task) and non-live panes show no indicator.
+            Self::LiveRemoteVm {
+                ambient_agent_task_id: None,
+                ..
+            }
+            | Self::UnconnectedReadOnly
+            | Self::Local => None,
+        }
     }
 }
 

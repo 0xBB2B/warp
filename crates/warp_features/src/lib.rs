@@ -977,6 +977,9 @@ pub enum FeatureFlag {
     /// signaled or torn down.
     CtrlCCancelsThirdPartyHarness,
 
+    /// Uses fzf or atuin for history search instead of Warp's command search.
+    ShellWidgetHandoff,
+
     /// Attaches process-tree liveness signals to long-running command
     /// snapshots, giving the agent evidence that a silent command is still
     /// doing work before it decides to cancel.
@@ -1070,6 +1073,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
 /// All PREVIEW_FLAGS are also automatically added to dogfood builds (WarpDev).
 pub const PREVIEW_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::NativeShellCompletions,
+    FeatureFlag::ShellWidgetHandoff,
     FeatureFlag::HistorySearchRankingV2,
 ];
 

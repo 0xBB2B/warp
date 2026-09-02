@@ -10,7 +10,6 @@ use ai::index::full_source_code_embedding::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use base64::Engine;
-#[cfg(not(target_family = "wasm"))]
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use cloud_object_models::CodeForge;
@@ -1521,6 +1520,14 @@ pub trait AIClient: 'static + Send + Sync {
         artifact_uid: &str,
     ) -> anyhow::Result<ArtifactDownloadResponse, anyhow::Error>;
 
+    /// Downloads the bytes of a computer-use screenshot stored in Warp-managed
+    /// object storage. Requires view access to the conversation.
+    async fn download_stored_screenshot(
+        &self,
+        conversation_id: &str,
+        screenshot_uid: &str,
+    ) -> anyhow::Result<Bytes, anyhow::Error>;
+
     async fn prepare_attachments_for_upload(
         &self,
         task_id: &AmbientAgentTaskId,
@@ -3000,6 +3007,27 @@ impl AIClient for ServerApi {
             .get_public_api(&format!("agent/artifacts/{artifact_uid}"))
             .await?;
         Ok(response)
+    }
+
+    async fn download_stored_screenshot(
+        &self,
+        conversation_id: &str,
+        screenshot_uid: &str,
+    ) -> anyhow::Result<Bytes, anyhow::Error> {
+        // The endpoint redirects to a short-lived signed URL, which the HTTP
+        // client follows transparently. Strip that URL from body-read errors so
+        // it cannot leak into logs or Sentry breadcrumbs.
+        let response = self
+            .get_public_api_response(&format!(
+                "agent/conversations/{}/screenshots/{}/download",
+                urlencoding::encode(conversation_id),
+                urlencoding::encode(screenshot_uid)
+            ))
+            .await?;
+        response
+            .bytes()
+            .await
+            .map_err(|error| anyhow::Error::new(error.without_url()))
     }
 
     async fn prepare_attachments_for_upload(
